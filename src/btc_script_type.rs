@@ -110,7 +110,7 @@ impl BtcScriptType {
     }
 
     /// The #0 path, for the recovery-phrase eyebrow. Native's copy is pinned
-    /// to the frozen deriver's literal by `btcsetup`'s test.
+    /// to the frozen derivers' literal by a test in `bridge`.
     pub fn path(self) -> &'static str {
         match self {
             Self::NativeSegwit => "m/84'/0'/0'/0/0",
