@@ -225,7 +225,7 @@ pub(crate) fn dispatched() {
 pub(crate) fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
-        log.fail_active(msg.to_string());
+        log.restate_failure(msg.to_string());
         let _ = CHANNEL.activity_tx.send(log_opt.clone());
     }
 }

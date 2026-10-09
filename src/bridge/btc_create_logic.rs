@@ -1,10 +1,9 @@
 // src/ui/managebtc/btccreate/btccreatelogic.rs
 
 use crate::btc_script_type::BtcScriptType;
-use crate::channel::{CHANNEL, ActivityLogState, WSCommand};
+use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
 use crate::wallet::ImportMode;
 use crate::encrypt::encrypt_data;
-use crate::ws::commands::bitcoin_import_wallet::{PendingBtcImport, set_pending_btc};
 use bip39::{Language, Mnemonic};
 use bitcoin::address::Address;
 use bitcoin::bip32::{DerivationPath, Xpriv};
@@ -114,21 +113,25 @@ impl BTCCreateLogic {
                 log.start("connect");
                 let _ = CHANNEL.activity_tx.send(Some(log.clone()));
 
-                set_pending_btc(PendingBtcImport {
-                    address: address.clone(),
-                    encrypted_phrase: encrypted,
-                    salt,
-                    iv,
-                    method,
-                    // Create = fresh random mnemonic: the relay's walk finds
-                    // nothing, so btc.json gets #0 alone.
-                    account_xpub,
-                    script_type,
-                });
-
+                // The record rides the command; the socket task keeps it for
+                // the reply (`RelayState::track`). The xpub and script type
+                // ride again in the open, for the frame `execute` sends.
+                // Create = fresh random mnemonic: the relay's walk finds
+                // nothing, so btc.json gets #0 alone.
                 let _ = ws_tx.try_send(WSCommand {
                     command: "import_bitcoin_wallet".to_string(),
-                    wallet: Some(address),
+                    wallet: Some(address.clone()),
+                    xpub: Some(account_xpub.clone()),
+                    script_type: Some(script_type.tag()),
+                    pending: Some(PendingWallet {
+                        address,
+                        encrypted_phrase: encrypted,
+                        salt,
+                        iv,
+                        method,
+                        account_xpub,
+                        script_type,
+                    }),
                     ..Default::default()
                 });
 

@@ -1,8 +1,7 @@
 use crate::btc_script_type::BtcScriptType;
-use crate::channel::{CHANNEL, ActivityLogState, WSCommand};
+use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
 use crate::wallet::ImportMode;
 use crate::encrypt::encrypt_data;
-use crate::ws::commands::bitcoin_import_wallet::{PendingBtcImport, set_pending_btc};
 use bip39::{Language, Mnemonic};
 use bitcoin::address::Address;
 use bitcoin::bip32::{DerivationPath, Xpriv};
@@ -135,21 +134,23 @@ impl BTCImportLogic {
                 log.start("connect");
                 let _ = CHANNEL.activity_tx.send(Some(log.clone()));
 
-                let address = prepared.address.clone();
-
-                set_pending_btc(PendingBtcImport {
-                    address: prepared.address,
-                    encrypted_phrase: prepared.encrypted_phrase,
-                    salt: prepared.salt,
-                    iv: prepared.iv,
-                    method: prepared.method,
-                    account_xpub: prepared.account_xpub,
-                    script_type: prepared.script_type,
-                });
-
+                // The record rides the command; the socket task keeps it for
+                // the reply (`RelayState::track`). The xpub and script type
+                // ride again in the open, for the frame `execute` sends.
                 let _ = ws_tx.try_send(WSCommand {
                     command: "import_bitcoin_wallet".to_string(),
-                    wallet: Some(address),
+                    wallet: Some(prepared.address.clone()),
+                    xpub: Some(prepared.account_xpub.clone()),
+                    script_type: Some(prepared.script_type.tag()),
+                    pending: Some(PendingWallet {
+                        address: prepared.address,
+                        encrypted_phrase: prepared.encrypted_phrase,
+                        salt: prepared.salt,
+                        iv: prepared.iv,
+                        method: prepared.method,
+                        account_xpub: prepared.account_xpub,
+                        script_type: prepared.script_type,
+                    }),
                     ..Default::default()
                 });
 

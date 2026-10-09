@@ -1,47 +1,15 @@
-use crate::channel::{CHANNEL, WSCommand};
+use crate::channel::{CHANNEL, PendingWallet, WSCommand};
 use crate::bridge::json_storage::{read_bytes, remove_json, write_bytes, write_json};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::{Mutex, OnceLock};
 use tungstenite::Message;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// ── Pending create state ──────────────────────────────────────────────────────
-// Self-contained twin of the import path's pending store. A freshly created
-// wallet has nothing on-chain to fetch, so create never touches import_wallet.
-// Holds the encrypted key material between bridge (derive) and process_response
-// (write to disk). ZeroizeOnDrop wipes the heap buffers on drop.
-
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct PendingXrpCreate {
-    pub address: String,
-    pub encrypted_phrase: String,
-    pub salt: String,
-    pub iv: String,
-    /// "standard" | "cold" — decides what gets written.
-    pub method: String,
-}
-
-static PENDING_XRP_CREATE: OnceLock<Mutex<Option<PendingXrpCreate>>> = OnceLock::new();
-
-fn pending_store() -> &'static Mutex<Option<PendingXrpCreate>> {
-    PENDING_XRP_CREATE.get_or_init(|| Mutex::new(None))
-}
-
-pub(crate) fn set_pending_xrp(data: PendingXrpCreate) {
-    *pending_store().lock().unwrap() = Some(data);
-}
-
-fn take_pending_xrp() -> Option<PendingXrpCreate> {
-    pending_store().lock().unwrap().take()
-}
-
-/// Drop a pending create on failure. The prepared secrets zeroize on drop
-/// (`ZeroizeOnDrop`), so this is the whole cleanup.
-fn cancel_pending() {
-    let _ = take_pending_xrp();
-}
+// Self-contained twin of the import path: a freshly created wallet has nothing
+// on-chain to fetch, so create never touches import_wallet. The derive's
+// record (`PendingWallet`) rides the command and is handed to
+// `process_response` by the socket task, which held it meanwhile
+// (`RelayState`). Until 2026-10-09 it sat in a static behind a Mutex here.
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,7 +23,7 @@ struct EncryptedWalletData {
 fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
-        log.fail_active(msg.to_string());
+        log.restate_failure(msg.to_string());
         let _ = CHANNEL.activity_tx.send(log_opt.clone());
     }
 }
@@ -68,7 +36,6 @@ pub async fn execute(_current_wallet: String, cmd: WSCommand) -> Result<(), Stri
     let wallet = match cmd.wallet {
         Some(w) => w,
         None => {
-            cancel_pending();
             fail_log(FAILED);
             return Err(FAILED.to_string());
         }
@@ -78,7 +45,6 @@ pub async fn execute(_current_wallet: String, cmd: WSCommand) -> Result<(), Stri
 
     if let Some(tx) = CRYPTO_OUTGOING_TX.get() {
         if tx.send(Message::text(msg_json.to_string())).await.is_err() {
-            cancel_pending();
             fail_log(FAILED);
             return Err(FAILED.to_string());
         }
@@ -95,14 +61,17 @@ pub async fn execute(_current_wallet: String, cmd: WSCommand) -> Result<(), Stri
     Ok(())
 }
 
-pub async fn process_response(message: Message, _current_wallet: &str) -> Result<(), String> {
+pub async fn process_response(
+    message: Message,
+    _current_wallet: &str,
+    pending: Option<PendingWallet>,
+) -> Result<(), String> {
     static FAILED: &str = "Error: Wallet creation failed";
     match message {
         Message::Text(text) => {
             let data: Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
                 Err(e) => {
-                    cancel_pending();
                     fail_log(&format!("{}: parse error", FAILED));
                     return Err(format!("Failed to parse JSON: {}", e));
                 }
@@ -124,12 +93,9 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                     let _ = CHANNEL.activity_tx.send(log_opt.clone());
                 }
 
-                let pending = match take_pending_xrp() {
-                    Some(p) => p,
-                    None => {
-                        fail_log(FAILED);
-                        return Ok(());
-                    }
+                let Some(pending) = pending else {
+                    fail_log(FAILED);
+                    return Ok(());
                 };
 
                 let is_cold = pending.method == "cold";
@@ -203,12 +169,10 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                     let _ = CHANNEL.activity_tx.send(log_opt.clone());
                 }
             } else {
-                cancel_pending();
                 fail_log(FAILED);
             }
         }
         _ => {
-            cancel_pending();
             fail_log(FAILED);
         }
     }

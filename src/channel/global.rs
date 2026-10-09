@@ -1,5 +1,7 @@
+use crate::btc_script_type::BtcScriptType;
 use crate::channel::{Health, CHANNEL};
 use crate::secure::SecureString;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ── Activity Log ──────────────────────────────────────────────────────────────
 
@@ -8,7 +10,14 @@ pub enum ActivityStepState {
     Pending,
     Active { since: std::time::Instant },
     Ok { ms: u64, at: std::time::Instant },
+    /// A verdict: the flow's own, or the network's. It stands — a frame that
+    /// is not this flow's own never rewrites it.
     Error { message: String },
+    /// The watchdog stopped waiting on this step (`channel::activity_watchdog`).
+    /// Not a verdict: the answer may still land, and when it does, `finish`
+    /// or `restate_failure` replaces this with what it said. Reads as a
+    /// failure everywhere else — the log is terminal, Done is live.
+    Stalled { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +129,9 @@ impl ActivityLogState {
     }
 
     pub fn any_error(&self) -> bool {
-        self.steps.iter().any(|s| matches!(s.state, ActivityStepState::Error { .. }))
+        self.steps.iter().any(|s| {
+            matches!(s.state, ActivityStepState::Error { .. } | ActivityStepState::Stalled { .. })
+        })
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -134,6 +145,7 @@ impl ActivityLogState {
         self.note = Some(message);
     }
 
+    /// A verdict on the step still running: the flow's own, or the network's.
     pub fn fail_active(&mut self, message: String) {
         for step in self.steps.iter_mut() {
             if matches!(step.state, ActivityStepState::Active { .. }) {
@@ -143,20 +155,34 @@ impl ActivityLogState {
         }
     }
 
+    /// The watchdog's word on the step still running: we stopped waiting,
+    /// which is not a verdict (`ActivityStepState::Stalled`).
+    pub fn stall_active(&mut self, message: String) {
+        for step in self.steps.iter_mut() {
+            if matches!(step.state, ActivityStepState::Active { .. }) {
+                step.state = ActivityStepState::Stalled { message };
+                break;
+            }
+        }
+    }
+
     /// State a failure on whichever step is carrying it — the one still
-    /// running, or the one that has already failed.
+    /// running, or the one the watchdog stalled.
     ///
-    /// The second case is the whole reason this exists. The watchdog fails a
-    /// step with an honest "it may still complete", and up to a
-    /// minute later the ledger index passes the transaction's
-    /// `LastLedgerSequence` and turns that doubt into a fact. Refusing to
-    /// overwrite would leave the weaker of two true statements on screen for
-    /// no reason other than which arrived first.
+    /// The second case is the whole reason this exists. The watchdog stalls a
+    /// step with an honest "it may still complete", and up to a minute later
+    /// the ledger index passes the transaction's `LastLedgerSequence` and
+    /// turns that doubt into a fact. Refusing to overwrite would leave the
+    /// weaker of two true statements on screen for no reason other than which
+    /// arrived first. A definite `Error` is never rewritten: the relay and
+    /// the proxy deliver a wallet's frames to every session holding it, so a
+    /// reply handler can run on a frame that is not this flow's own, and that
+    /// frame must not touch a verdict already given.
     pub fn restate_failure(&mut self, message: String) {
         for step in self.steps.iter_mut() {
             if matches!(
                 step.state,
-                ActivityStepState::Active { .. } | ActivityStepState::Error { .. }
+                ActivityStepState::Active { .. } | ActivityStepState::Stalled { .. }
             ) {
                 step.state = ActivityStepState::Error { message };
                 return;
@@ -165,7 +191,42 @@ impl ActivityLogState {
     }
 }
 
+/// What an import or create's reply must find on this side: the record the
+/// derive produced, which the reply handler writes to disk once the relay has
+/// confirmed the address. It rides the command to the socket task, which
+/// keeps it until the reply (`RelayState`): one owner, and nothing shared
+/// between the flow that derived it and the task that reads the relay. A
+/// process that dies in between loses it, the files untouched, and the user
+/// imports again. `ZeroizeOnDrop` wipes the heap buffers on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct PendingWallet {
+    pub address: String,
+    pub encrypted_phrase: String,
+    pub salt: String,
+    pub iv: String,
+    /// "standard" | "cold" — decides what gets written.
+    pub method: String,
+    /// Bitcoin only: the neutered `m/{purpose}'/0'/0'` xpub, persisted to
+    /// btc.json for receive rotation (address derivation without the seed).
+    /// Reveals addresses, never keys. Empty for XRP.
+    pub account_xpub: String,
+    /// Bitcoin only: the address type chosen at import or create, persisted
+    /// as `script_type` so rotation and member derivation walk the same
+    /// purpose. The default for XRP, which never reads it.
+    #[zeroize(skip)]
+    pub script_type: BtcScriptType,
+}
 
+// The key material stays out of any debug output.
+impl std::fmt::Debug for PendingWallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingWallet")
+            .field("address", &self.address)
+            .field("method", &self.method)
+            .field("script_type", &self.script_type)
+            .finish_non_exhaustive()
+    }
+}
 
 // NOT `Clone`: the three secret fields hold mlocked `SecureString`s, so a clone
 // would duplicate secret bytes into a second locked buffer. Consumers move the
@@ -204,4 +265,16 @@ pub struct WSCommand {
     /// settled rows of it the app already holds.
     pub history_kind: Option<&'static str>,
     pub history_offset: Option<usize>,
+    /// An import or create (`import_wallet`, `create_wallet`,
+    /// `import_bitcoin_wallet`): the derive's record, for the reply to write.
+    /// The socket task takes it off the command when it tracks it
+    /// (`RelayState::track`) and hands it to the reply handler; the
+    /// command's own `execute` never sees it.
+    pub pending: Option<PendingWallet>,
+    /// A Bitcoin import or create: the account xpub and the script-type tag
+    /// the relay walks the wallet with, as `execute` puts them on the wire.
+    /// Public data, repeated here because `pending` has left the command by
+    /// the time `execute` runs.
+    pub xpub: Option<String>,
+    pub script_type: Option<&'static str>,
 }

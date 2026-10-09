@@ -86,6 +86,9 @@ impl XRPSendLogic {
             replaces: None,
             history_kind: None,
             history_offset: None,
+            pending: None,
+            xpub: None,
+            script_type: None,
         };
 
         ws_tx.try_send(cmd).map_err(|e| {

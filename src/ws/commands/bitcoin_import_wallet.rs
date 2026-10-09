@@ -1,53 +1,16 @@
 // ws/commands/bitcoin_import_wallet.rs
 
-use crate::channel::{CHANNEL, WSCommand};
+use crate::channel::{CHANNEL, PendingWallet, WSCommand};
 use crate::bridge::json_storage::{read_bytes, read_json, remove_json, write_bytes, write_json};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::{Mutex, OnceLock};
 use tungstenite::Message;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// ── Pending import state ──────────────────────────────────────────────────────
-
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct PendingBtcImport {
-    pub address: String,
-    pub encrypted_phrase: String,
-    pub salt: String,
-    pub iv: String,
-    /// "standard" | "cold" — decides what gets written.
-    pub method: String,
-    /// Neutered `m/{purpose}'/0'/0'` xpub — persisted to btc.json for
-    /// receive rotation (address derivation without the seed). Reveals
-    /// addresses, never keys.
-    pub account_xpub: String,
-    /// The address type chosen at import/create — persisted as
-    /// `script_type` so rotation and member derivation walk the same purpose.
-    #[zeroize(skip)]
-    pub script_type: crate::btc_script_type::BtcScriptType,
-}
-
-static PENDING_BTC: OnceLock<Mutex<Option<PendingBtcImport>>> = OnceLock::new();
-
-fn pending_store() -> &'static Mutex<Option<PendingBtcImport>> {
-    PENDING_BTC.get_or_init(|| Mutex::new(None))
-}
-
-pub(crate) fn set_pending_btc(data: PendingBtcImport) {
-    *pending_store().lock().unwrap() = Some(data);
-}
-
-fn take_pending_btc() -> Option<PendingBtcImport> {
-    pending_store().lock().unwrap().take()
-}
-
-/// Drop a pending import on failure. The prepared secrets zeroize on drop
-/// (`ZeroizeOnDrop`), so this is the whole cleanup.
-fn cancel_pending() {
-    let _ = take_pending_btc();
-}
+// The derive's record (`PendingWallet`, with the account xpub and script type
+// for Bitcoin) rides the command and is handed to `process_response` by the
+// socket task, which held it meanwhile (`RelayState`). Create rides the same
+// command. Until 2026-10-09 it sat in a static behind a Mutex here.
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -61,7 +24,7 @@ struct EncryptedWalletData {
 fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
-        log.fail_active(msg.to_string());
+        log.restate_failure(msg.to_string());
         let _ = CHANNEL.activity_tx.send(log_opt.clone());
     }
 }
@@ -77,7 +40,6 @@ pub async fn execute(
     let wallet = match cmd.wallet {
         Some(w) => w,
         None => {
-            cancel_pending();
             fail_log(FAILED);
             return Err(FAILED.to_string());
         }
@@ -89,13 +51,8 @@ pub async fn execute(
     // of this client deriving a 2 × 1000 window and sending it as addresses.
     // Create sends it too: a fresh mnemonic finds nothing, and the relay still
     // learns the wallet's membership, which is what tells change from money
-    // sent. Read off the pending import — btc.json does not exist yet.
-    let key = pending_store()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|p| (p.account_xpub.clone(), p.script_type.tag()));
-    let Some((xpub, script_type)) = key else {
+    // sent. Read off the command — btc.json does not exist yet.
+    let (Some(xpub), Some(script_type)) = (cmd.xpub, cmd.script_type) else {
         fail_log(FAILED);
         return Err(FAILED.to_string());
     };
@@ -108,7 +65,6 @@ pub async fn execute(
 
     if let Some(tx) = CRYPTO_OUTGOING_TX.get() {
         if tx.send(Message::text(msg_json.to_string())).await.is_err() {
-            cancel_pending();
             fail_log(FAILED);
             return Err(FAILED.to_string());
         }
@@ -128,6 +84,7 @@ pub async fn execute(
 pub async fn process_response(
     message: Message,
     _bitcoin_current_wallet: &str,
+    pending: Option<PendingWallet>,
 ) -> Result<(), String> {
     static FAILED: &str = "Error: Bitcoin wallet import failed";
     match message {
@@ -135,7 +92,6 @@ pub async fn process_response(
             let data: Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
                 Err(e) => {
-                    cancel_pending();
                     fail_log(&format!("{}: parse error", FAILED));
                     return Err(format!("Failed to parse JSON: {}", e));
                 }
@@ -150,7 +106,6 @@ pub async fn process_response(
             // btc_encrypt.json and register a healthy-looking zero-balance
             // wallet for an import that never happened.
             if let Some(err) = data.get("error").and_then(|e| e.as_str()) {
-                cancel_pending();
                 fail_log(&format!("Error: {}", err));
                 return Ok(());
             }
@@ -159,7 +114,6 @@ pub async fn process_response(
             // and answered for #0 alone: saving that would import a long-used
             // wallet as one address, its other coins invisible. Refused.
             if data.get("wallet").is_some() && data.get("used").is_none() {
-                cancel_pending();
                 fail_log("Error: Bitcoin service is out of date — try again shortly");
                 return Ok(());
             }
@@ -180,12 +134,9 @@ pub async fn process_response(
                     let _ = CHANNEL.activity_tx.send(log_opt.clone());
                 }
 
-                let pending = match take_pending_btc() {
-                    Some(p) => p,
-                    None => {
-                        fail_log(FAILED);
-                        return Ok(());
-                    }
+                let Some(pending) = pending else {
+                    fail_log(FAILED);
+                    return Ok(());
                 };
 
                 // The reply's `wallet` is an address to MATCH, never an
@@ -368,12 +319,10 @@ pub async fn process_response(
                     let _ = CHANNEL.activity_tx.send(log_opt.clone());
                 }
             } else {
-                cancel_pending();
                 fail_log(FAILED);
             }
         }
         _ => {
-            cancel_pending();
             fail_log(FAILED);
         }
     }

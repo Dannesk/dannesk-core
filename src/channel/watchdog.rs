@@ -66,16 +66,20 @@ pub async fn activity_watchdog() {
         loop {
             tokio::select! {
                 verdict = &mut budget => {
-                    // Fail the step still running — in the channel, atomically
-                    // with any step landing at this instant. A late answer may
-                    // still finish that step: `finish` overwrites the error,
-                    // which is the right order for the two true statements.
+                    // Stall the step still running — in the channel, atomically
+                    // with any step landing at this instant. Stalled, not
+                    // failed: a late answer may still land on that step, and
+                    // `finish` or `restate_failure` then replaces this with
+                    // what it said, which is the right order for the two true
+                    // statements. A definite error, which a stray frame for
+                    // the same wallet must never rewrite, is the one thing
+                    // this never writes.
                     CHANNEL.activity_tx.send_modify(|current| {
                         if let Some(log) = current
                             && !log.is_terminal()
                             && continues(&last, log)
                         {
-                            log.fail_active(message(verdict, log.health_key.is_some()).to_string());
+                            log.stall_active(message(verdict, log.health_key.is_some()).to_string());
                         }
                     });
                     break;
@@ -114,7 +118,9 @@ fn rank(state: &ActivityStepState) -> u8 {
     match state {
         ActivityStepState::Pending => 0,
         ActivityStepState::Active { .. } => 1,
-        ActivityStepState::Ok { .. } | ActivityStepState::Error { .. } => 2,
+        ActivityStepState::Ok { .. }
+        | ActivityStepState::Error { .. }
+        | ActivityStepState::Stalled { .. } => 2,
     }
 }
 

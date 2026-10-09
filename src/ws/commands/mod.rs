@@ -1,4 +1,4 @@
-use crate::channel::WSCommand;
+use crate::channel::{PendingWallet, WSCommand};
 use tungstenite::Message;
 
 pub mod balances;
@@ -161,15 +161,23 @@ impl Command {
         }
     }
 
+    /// `pending` is the record an import or create's command carried, handed
+    /// over by the socket task for the three replies that write it; `None`
+    /// for every other command.
     pub async fn process_response(
         &self,
         message: Message,
         current_wallet: &str,
         bitcoin_current_wallet: &str,
+        pending: Option<PendingWallet>,
     ) -> Result<(), String> {
         match self {
-            Command::ImportWallet => import_wallet::process_response(message, current_wallet).await,
-            Command::CreateWallet => create_wallet::process_response(message, current_wallet).await,
+            Command::ImportWallet => {
+                import_wallet::process_response(message, current_wallet, pending).await
+            }
+            Command::CreateWallet => {
+                create_wallet::process_response(message, current_wallet, pending).await
+            }
             Command::DeleteWallet => delete_wallet::process_response(message, current_wallet).await,
             Command::SubmitTransaction => {
                 submit_transaction::process_response(message, current_wallet).await
@@ -189,7 +197,7 @@ impl Command {
             | Command::GetXRPBalance => balances::process_response(message, current_wallet).await,
 
             Command::ImportBitcoinWallet => {
-                bitcoin_import_wallet::process_response(message, bitcoin_current_wallet).await
+                bitcoin_import_wallet::process_response(message, bitcoin_current_wallet, pending).await
             }
             // Outgoing only: the relay never answers under this name.
             Command::SubscribeBitcoinAddresses => Ok(()),

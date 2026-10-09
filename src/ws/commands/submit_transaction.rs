@@ -7,7 +7,7 @@ use tungstenite::Message;
 fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
-        log.fail_active(msg.to_string());
+        log.restate_failure(msg.to_string());
         let _ = CHANNEL.activity_tx.send(log_opt.clone());
     }
 }
@@ -45,14 +45,20 @@ fn finish_log_noted(id: &'static str, note: String) {
 /// Land `broadcast` and light `confirm` — once. The relay's `submitted` ack
 /// is what normally does this; the terminal response calls it too, because an
 /// ack lost to a dropped socket must not leave `broadcast` spinning under a
-/// finished `confirm`. Idempotent: a `broadcast` already landed is left alone.
+/// finished `confirm`. A `broadcast` the watchdog has stalled ("may still
+/// complete", `channel::activity_watchdog`) counts as still in flight: the
+/// response in hand is the answer it was waiting for, so it lands the same
+/// way. A `broadcast` that FAILED — nothing was sent, by this flow's own
+/// verdict — is left alone, whatever frame arrives: the relay delivers a
+/// wallet's frames to every session holding it. Idempotent: a `broadcast`
+/// already landed is left alone.
 fn ensure_confirming() {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
-        let broadcasting = log
-            .steps
-            .iter()
-            .any(|s| s.id == "broadcast" && matches!(s.state, ActivityStepState::Active { .. }));
+        let broadcasting = log.steps.iter().any(|s| {
+            s.id == "broadcast"
+                && matches!(s.state, ActivityStepState::Active { .. } | ActivityStepState::Stalled { .. })
+        });
         if broadcasting {
             log.finish("broadcast");
             log.start("confirm");

@@ -4,7 +4,7 @@
 //! `connection.rs` until 2026-09-04; the socket itself now lives in
 //! `socket.rs` and is shared with rates and bookd.
 
-use crate::channel::{CHANNEL, HistoryList, WSCommand};
+use crate::channel::{CHANNEL, HistoryList, PendingWallet, WSCommand};
 use crate::ws::commands::Command;
 use crate::ws::config::{TAG_BTC, TAG_RELAY};
 use serde::Serialize;
@@ -109,6 +109,16 @@ pub struct RelayState {
     /// the process, and the relay's own dormancy sweep is what covers the case
     /// where the user quits before the link ever comes back.
     pending_deletes: Vec<(String, String)>,
+    /// An import or create between its command and the relay's reply: the
+    /// derive's record, carried by the command (`WSCommand::pending`) and
+    /// kept here, where the reply arrives, so the handler that writes the
+    /// files is handed it by the one task that owns it. One slot per command
+    /// the relay answers under; a newer record replaces an older one still
+    /// waiting, as the next import always did, and a reply that never comes
+    /// leaves it until then. BTC create rides `import_bitcoin_wallet`.
+    pending_xrp_import: Option<PendingWallet>,
+    pending_xrp_create: Option<PendingWallet>,
+    pending_btc: Option<PendingWallet>,
 }
 
 impl RelayState {
@@ -133,15 +143,28 @@ impl RelayState {
         self.btc_live_list.clear();
     }
 
-    /// Update the re-sync facts from an outgoing command.
+    /// Update the re-sync facts from an outgoing command, and take an import
+    /// or create's record off it for its reply.
     ///
-    /// An import or create is NOT recorded here: until its reply lands the
-    /// wallet does not exist, and one that fails never will. Recording it at
-    /// command time left a FAILED import in these fields — re-synced on the
-    /// next link rise, counted by `has_wallet`, and handed to the signing
-    /// validation as the identity to compare against. `note_arrival` records
-    /// it when the reply has made it this client's wallet.
-    pub fn track(&mut self, cmd: &WSCommand) {
+    /// An import or create is NOT recorded as a wallet here: until its reply
+    /// lands the wallet does not exist, and one that fails never will.
+    /// Recording it at command time left a FAILED import in these fields —
+    /// re-synced on the next link rise, counted by `has_wallet`, and handed
+    /// to the signing validation as the identity to compare against.
+    /// `note_arrival` records it when the reply has made it this client's
+    /// wallet. What IS kept is the derive's record, in the slot of the
+    /// command the relay answers under.
+    pub fn track(&mut self, cmd: &mut WSCommand) {
+        if let Some(pending) = cmd.pending.take() {
+            match cmd.command.as_str() {
+                "import_wallet" => self.pending_xrp_import = Some(pending),
+                "create_wallet" => self.pending_xrp_create = Some(pending),
+                "import_bitcoin_wallet" => self.pending_btc = Some(pending),
+                // No reply handler reads one for any other command: dropped,
+                // and zeroized with it.
+                _ => {}
+            }
+        }
         if cmd.command == "get_cached_balance" {
             if let Some(w) = &cmd.wallet { self.current_wallet = w.clone(); }
         } else if cmd.command == "get_bitcoin_cached_balance" {
@@ -259,8 +282,18 @@ impl RelayState {
         let cmd_str = data.get("command").and_then(|c| c.as_str());
         if let Some(command) = cmd_str.and_then(Command::from_str) {
             let btc_primary = self.bitcoin_current_wallets.first().cloned().unwrap_or_default();
+            // The reply to an import or create is handed the record its
+            // command carried. Taken, not borrowed: every path through the
+            // handler ends it, written to disk or dropped (and zeroized),
+            // exactly as a reply without a wallet always cancelled it.
+            let pending = match command {
+                Command::ImportWallet => self.pending_xrp_import.take(),
+                Command::CreateWallet => self.pending_xrp_create.take(),
+                Command::ImportBitcoinWallet => self.pending_btc.take(),
+                _ => None,
+            };
             let _ = command
-                .process_response(Message::text(text), &self.current_wallet, &btc_primary)
+                .process_response(Message::text(text), &self.current_wallet, &btc_primary, pending)
                 .await;
             self.note_arrival(&data);
         }

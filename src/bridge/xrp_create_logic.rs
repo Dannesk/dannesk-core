@@ -1,7 +1,6 @@
-use crate::channel::{CHANNEL, ActivityLogState, WSCommand};
+use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
 use crate::wallet::ImportMode;
 use crate::encrypt::encrypt_data;
-use crate::ws::commands::create_wallet::{PendingXrpCreate, set_pending_xrp};
 use bip39::{Language, Mnemonic};
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::Secp256k1;
@@ -100,17 +99,20 @@ impl XRPCreateLogic {
                 log.start("connect");
                 let _ = CHANNEL.activity_tx.send(Some(log.clone()));
 
-                set_pending_xrp(PendingXrpCreate {
-                    address: address.clone(),
-                    encrypted_phrase: encrypted,
-                    salt,
-                    iv,
-                    method,
-                });
-
+                // The record rides the command; the socket task keeps it for
+                // the reply (`RelayState::track`).
                 let _ = ws_tx.try_send(WSCommand {
                     command: "create_wallet".to_string(),
-                    wallet: Some(address),
+                    wallet: Some(address.clone()),
+                    pending: Some(PendingWallet {
+                        address,
+                        encrypted_phrase: encrypted,
+                        salt,
+                        iv,
+                        method,
+                        account_xpub: String::new(),
+                        script_type: Default::default(),
+                    }),
                     ..Default::default()
                 });
             }

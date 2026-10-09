@@ -192,9 +192,9 @@ pub async fn run_websocket(
         let hello = format!(r#"{{"type":"hello","v":1,"app":"{}"}}"#, app_version);
         let mut first: Vec<Vec<u8>> = vec![frame(TAG_RELAY, &hello)];
         let mut deferred: Vec<WSCommand> = Vec::new();
-        while let Ok(cmd) = commands_rx.try_recv() {
+        while let Ok(mut cmd) = commands_rx.try_recv() {
             if cmd.command == "get_cached_balance" || cmd.command == "get_bitcoin_cached_balance" {
-                relay_state.track(&cmd);
+                relay_state.track(&mut cmd);
             } else {
                 deferred.push(cmd);
             }
@@ -245,8 +245,8 @@ pub async fn run_websocket(
             }
         };
         crate::ws::trace("socket: open (handshake done)");
-        for cmd in deferred {
-            relay_state.track(&cmd);
+        for mut cmd in deferred {
+            relay_state.track(&mut cmd);
             if relay_state.is_news(&cmd) {
                 relay_state.spawn_command(cmd);
             }
@@ -310,8 +310,8 @@ pub async fn run_websocket(
                     // Half-open: the proxy owes us a beat and didn't send one.
                     break;
                 }
-                Some(cmd) = commands_rx.recv() => {
-                    relay_state.track(&cmd);
+                Some(mut cmd) = commands_rx.recv() => {
+                    relay_state.track(&mut cmd);
                     if relay_state.is_news(&cmd) {
                         relay_state.spawn_command(cmd);
                     }
