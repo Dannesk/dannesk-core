@@ -24,14 +24,17 @@ mod tests {
     use super::XRP_PATH;
     use crate::btc_script_type::BtcScriptType;
 
-    /// The eyebrow must state the path the derivers actually walk. The
-    /// literals live in the (frozen) bridge files; these read them back
+    /// The eyebrow must state the path the derivers actually walk: create,
+    /// import, re-import and the auth signer, which must hold the wallet's
+    /// own key. The literals live in the (frozen) files; these read them back
     /// rather than trusting anyone to keep the strings in step by hand.
     #[test]
     fn xrp_path_is_the_derivers() {
         for (file, deriver) in [
             ("xrp_create_logic.rs", include_str!("xrp_create_logic.rs")),
             ("xrp_import_logic.rs", include_str!("xrp_import_logic.rs")),
+            ("xrp_wallet_operations.rs", include_str!("xrp_wallet_operations.rs")),
+            ("ws/commands/wallet_auth.rs", include_str!("../ws/commands/wallet_auth.rs")),
         ] {
             assert!(deriver.contains(&format!("\"{XRP_PATH}\"")), "XRP_PATH is not the path {file} derives");
         }
@@ -43,6 +46,8 @@ mod tests {
         for (file, deriver) in [
             ("btc_create_logic.rs", include_str!("btc_create_logic.rs")),
             ("btc_import_logic.rs", include_str!("btc_import_logic.rs")),
+            ("btc_wallet_operations.rs", include_str!("btc_wallet_operations.rs")),
+            ("ws/commands/bitcoin_auth.rs", include_str!("../ws/commands/bitcoin_auth.rs")),
         ] {
             assert!(deriver.contains(&format!("\"{path}\"")), "the native path is not the path {file} derives");
         }
