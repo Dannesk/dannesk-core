@@ -193,6 +193,9 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                 for token in crate::utils::tokens::TOKENS {
                     CHANNEL.set_token(token.code, (0.0, false, None));
                 }
+                // The new wallet's first balance is in (zero, provably), so the Balance
+                // total may be summed; see the import reply.
+                CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.xrp, true));
 
                 let mut log_opt = CHANNEL.activity_tx.borrow().clone();
                 if let Some(ref mut log) = log_opt {

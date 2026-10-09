@@ -236,6 +236,11 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                     .filter_map(parse_tx)
                     .collect();
                 CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(rows, &data, None));
+                // The first balance of this wallet, the account and the tokens are
+                // in: the Balance total may be summed. The cached-balance reply sets
+                // this at launch; an import mid-session must too, or the total reads
+                // the dash until the next reconnect (found 2026-10-09).
+                CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.xrp, true));
 
                 let mut log_opt = CHANNEL.activity_tx.borrow().clone();
                 if let Some(ref mut log) = log_opt {

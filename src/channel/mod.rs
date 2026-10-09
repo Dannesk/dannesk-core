@@ -2,11 +2,13 @@ pub mod btc;
 pub mod global;
 pub mod history;
 pub mod xrp;
+pub mod watchdog;
 
 pub use btc::*;
 pub use global::*;
 pub use history::*;
 pub use xrp::*;
+pub use watchdog::*;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -240,8 +242,9 @@ pub struct Loaded {
     /// `wallet::load_wallets` has read the local records: each chain's
     /// identity is in its channel by now, or there is none.
     pub wallets: bool,
-    /// The XRP relay's cached-balance reply has been applied: the balance,
-    /// the account and the tokens together.
+    /// The XRP balance, the account and the tokens have been applied together:
+    /// the relay's cached-balance reply at launch and on every reconnect, or the
+    /// import or create reply, which carries a wallet's first balance.
     pub xrp: bool,
     /// The Bitcoin wallet's coins have arrived, so its balance is the
     /// chain's figure.
