@@ -1,5 +1,5 @@
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 pub async fn execute(
     _bitcoin_current_wallet: String,

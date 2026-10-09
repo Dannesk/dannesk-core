@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::{timeout, Duration, Instant};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// A connect — the TCP dial, and then the handshake — that hasn't completed
 /// in this long is treated as failed. WITHOUT this the task can hang forever:

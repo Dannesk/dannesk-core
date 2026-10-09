@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::channel::WSCommand;
 use std::sync::OnceLock;
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 // Channels for communicating with the socket task
 pub static CRYPTO_COMMANDS_TX: OnceLock<mpsc::Sender<WSCommand>> = OnceLock::new();

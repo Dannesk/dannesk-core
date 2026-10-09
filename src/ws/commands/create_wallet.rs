@@ -4,7 +4,7 @@ use crate::ws::CRYPTO_OUTGOING_TX;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::{Mutex, OnceLock};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ── Pending create state ──────────────────────────────────────────────────────

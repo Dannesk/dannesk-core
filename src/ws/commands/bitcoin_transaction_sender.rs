@@ -1,6 +1,6 @@
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde_json::json;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 use uuid::Uuid;
 
 /// Hand a signed transaction to the relay. `replaces` names the mempool

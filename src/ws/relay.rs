@@ -9,7 +9,7 @@ use crate::ws::commands::Command;
 use crate::ws::config::{TAG_BTC, TAG_RELAY};
 use serde::Serialize;
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// The relay's contract: every payload rides inside this envelope. It carried
 /// a shared `auth_token` until 2026-09-20 — a string in a public binary gates

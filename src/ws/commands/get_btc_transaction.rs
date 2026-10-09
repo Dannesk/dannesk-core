@@ -1,6 +1,6 @@
 use crate::channel::{BitcoinTransactionStatus, BtcRbfInput, BtcRbfOutput, BtcTransactionData, CHANNEL};
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// An optional string field: absent, JSON null and empty all mean "we don't
 /// know", and none of them may become a rendered value.

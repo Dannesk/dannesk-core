@@ -2,7 +2,7 @@ use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// The whole-wallet ask (2026-09-20, the Trezor/Blockbook shape): ONE message
 /// carrying the account xpub, from which the Bitcoin relay derives both

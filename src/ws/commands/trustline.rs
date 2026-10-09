@@ -1,7 +1,7 @@
 use crate::channel::CHANNEL;
 use crate::utils::tokens;
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 pub async fn execute(
     _current_wallet: String,

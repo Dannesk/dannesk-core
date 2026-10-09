@@ -2,7 +2,7 @@ use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use crate::utils::tokens;
 use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// Is this a live-balance command we handle? `xrp_balance` is the native asset;
 /// every issued token is recognized by its registry `balance_cmd`.

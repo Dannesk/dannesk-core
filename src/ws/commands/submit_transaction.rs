@@ -2,7 +2,7 @@ use crate::channel::{ActivityStepState, CHANNEL, WSCommand};
 use crate::ws::commands::{transaction_builder, transaction_sender, validation, wallet_auth};
 use serde_json::Value;
 use sha2::{Digest, Sha512};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();

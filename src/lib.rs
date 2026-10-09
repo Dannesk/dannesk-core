@@ -17,7 +17,6 @@ pub mod decrypt;
 pub mod encrypt;
 pub mod gate;
 pub mod secure;
-mod startup;
 pub mod utils;
 pub mod wallet;
 pub mod ws;
@@ -41,13 +40,11 @@ pub struct App {
 
 static APP: OnceLock<App> = OnceLock::new();
 
-/// Registers the app and installs the TLS provider. Call it first, before the
-/// runtime starts and before any file is read, and only once: a second call
-/// changes nothing and hands the argument back as the error.
+/// Registers the app. Call it first, before the runtime starts and before any
+/// file is read, and only once: a second call changes nothing and hands the
+/// argument back as the error.
 pub fn init(app: App) -> Result<(), App> {
-    APP.set(app)?;
-    startup::init_globals();
-    Ok(())
+    APP.set(app)
 }
 
 /// The registered app, once [`init`] has run.

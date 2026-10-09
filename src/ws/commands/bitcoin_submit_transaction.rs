@@ -5,7 +5,7 @@ use crate::ws::commands::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 /// Broadcasts in flight, txid → (wallet, raw hex). Stashed at dispatch and
 /// consumed by the relay's response: on success the signed transaction itself

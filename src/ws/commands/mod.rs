@@ -1,5 +1,5 @@
 use crate::channel::WSCommand;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 pub mod balances;
 pub mod bitcoin_auth;

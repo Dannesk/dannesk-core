@@ -28,8 +28,6 @@ allow = [
     "Apache-2.0",
     "BSD-3-Clause",
     "CC0-1.0",
-    "CDLA-Permissive-2.0",  # webpki-roots: Mozilla's root certificates, as data
-    "ISC",
     "MIT",
     "MITNFA",  # hex_lit, via bitcoin: MIT plus a clause against false attribution
     "Unicode-3.0",

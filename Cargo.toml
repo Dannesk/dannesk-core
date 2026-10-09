@@ -13,12 +13,10 @@ publish = false
 # are on crates.io.
 dannesk-xrpl-codec = { git = "https://github.com/Dannesk/dannesk-xrpl-codec", rev = "7a9243bce1905fedcac38b986e0e321c52db4c1f" }
 dannesk-noise-protocol = { git = "https://github.com/Dannesk/dannesk-noise-protocol", rev = "6d7671a7e45b3e7d07c0716c1fcf6bf03dbab220", features = ["tokio"] }
-chrono = "0.4.45"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.2", features = ["full"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-futures-util = "0.3.34"  # For StreamExt and SinkExt
+tungstenite = { version = "0.30.0", default-features = false }  # its Message type alone: the frames queued for the socket
 uuid = { version = "1.27.0", features = ["v4"] }
 zeroize = { version = "1.9", features = ["derive", "serde"] }
 bitcoin = "0.32.102"
@@ -28,7 +26,6 @@ aes-gcm = "0.11.1"
 rand = "0.10.3"
 base64 = "0.23.1"
 argon2 = "0.6.0"
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "0.11.0"
 ripemd = "0.2.0"
 bs58 = { version = "0.5.1", features = ["check"] }

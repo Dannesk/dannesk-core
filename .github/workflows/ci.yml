@@ -7,10 +7,11 @@
 # read before its result is trusted. Merging stays a person's decision; no
 # result here merges or blocks anything.
 #
-#   test     compiles and runs the tests on Linux, on x86_64 and on arm64;
-#            fails if Cargo.lock is out of step with Cargo.toml
-#   android  compiles the crate for Android on arm64, its C parts built by
-#            the NDK's compiler
+#   test     compiles and runs the tests on Linux, on x86_64 and on arm64,
+#            then checks the release profile, which holds code the tests
+#            never reach; fails if Cargo.lock is out of step with Cargo.toml
+#   android  checks the crate as Android ships it: arm64, release profile,
+#            its C parts compiled by the NDK's compiler
 #   msrv     checks that the crate compiles on the Rust that Cargo.toml's
 #            rust-version names, the oldest it promises to build on
 #   clippy   correctness lints only, the ones for code that cannot be right
@@ -58,6 +59,11 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # Release builds compile code that debug builds leave out, such as the
+      # production server address and the process hardening.
+      - name: Check, release profile
+        run: cargo check --locked --release
+
   android:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -73,14 +79,14 @@ jobs:
           rustup target add aarch64-linux-android
 
       # The runner image ships the Android NDK. Its clang compiles the C in
-      # aws-lc, secp256k1 and zstd for API level 26 (Android 8.0), the oldest
-      # Android the app supports.
+      # secp256k1 and zstd for API level 26 (Android 8.0), the oldest Android
+      # the app supports. Release is the profile the app ships.
       - name: Check
         run: |
           bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang"
           export AR_aarch64_linux_android="$bin/llvm-ar"
-          cargo check --locked --target aarch64-linux-android
+          cargo check --locked --release --target aarch64-linux-android
 
   msrv:
     runs-on: ubuntu-24.04

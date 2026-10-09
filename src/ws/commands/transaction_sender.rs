@@ -1,6 +1,6 @@
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde_json::json;
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 use uuid::Uuid;
 
 /// Hand the signed blob to the relay. Returns the `tx_id` minted for it — the

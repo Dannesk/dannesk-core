@@ -3,7 +3,7 @@
 use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message;
+use tungstenite::Message;
 
 fn fail_log(msg: &str) {
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
