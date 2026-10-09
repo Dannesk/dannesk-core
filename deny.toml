@@ -1,0 +1,60 @@
+# cargo-deny: what a change may bring into the core's dependency graph.
+#
+# .github/workflows/ci.yml runs `cargo deny check sources bans licenses` on
+# every pull request and every push to main, and any finding fails the run.
+# Advisories are checked in a step of their own that reports and never fails.
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# The platforms the core ships on: desktop Linux on both architectures, and
+# Android. Crates used only on other platforms stay outside the graph until
+# those builds exist.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-linux-android"]
+
+[advisories]
+# RustSec. Unmaintained and unsound crates are reported anywhere in the graph,
+# not only among our direct dependencies. An advisory can land on a crate long
+# after it entered the lock, so CI reports these without failing (ci.yml).
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+
+[licenses]
+# The core is GPL-3.0-or-later, like the apps built on it, and each licence
+# here can be combined with it. A crate under any other licence fails the
+# check until that licence is added here on purpose.
+allow = [
+    "GPL-3.0-or-later",  # the core itself
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",  # webpki-roots: Mozilla's root certificates, as data
+    "ISC",
+    "MIT",
+    "MITNFA",  # hex_lit, via bitcoin: MIT plus a clause against false attribution
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Two versions of one crate are the upstream crates' concern, not a finding.
+multiple-versions = "allow"
+deny = [
+    # Telemetry and crash reporting. Every Sentry and OpenTelemetry crate
+    # depends on one of these two.
+    { crate = "sentry-core", reason = "no telemetry or crash reporting in the wallet" },
+    { crate = "opentelemetry", reason = "no telemetry or crash reporting in the wallet" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# A git dependency must name the exact commit it builds.
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Our own MIT crates, each in its own repository and pinned to a commit until
+# they are on crates.io.
+allow-git = [
+    "https://github.com/Dannesk/dannesk-xrpl-codec",
+    "https://github.com/Dannesk/dannesk-noise-protocol",
+]
