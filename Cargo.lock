@@ -262,7 +262,7 @@ dependencies = [
 [[package]]
 name = "dannesk-btc-codec"
 version = "0.1.0"
-source = "git+https://github.com/Dannesk/dannesk-btc-codec?rev=a5922c97c92834c85ffe72bbfadc49e72896e6bf#a5922c97c92834c85ffe72bbfadc49e72896e6bf"
+source = "git+https://github.com/Dannesk/dannesk-btc-codec?rev=5c4fe7bc359288cb61180cd1566ebbee7a9b32c0#5c4fe7bc359288cb61180cd1566ebbee7a9b32c0"
 dependencies = [
  "bs58",
  "hex",
