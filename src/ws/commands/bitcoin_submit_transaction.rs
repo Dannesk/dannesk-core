@@ -29,10 +29,10 @@ struct InFlight {
 }
 
 pub(crate) fn stash_in_flight(wallet: &str, tx_hex: &str, replaces: Option<&str>) {
-    use bitcoin::consensus::encode::deserialize_hex;
-    if let Ok(tx) = deserialize_hex::<bitcoin::Transaction>(tx_hex) {
+    use dannesk_btc_codec::tx::Transaction;
+    if let Ok(tx) = Transaction::from_hex(tx_hex) {
         in_flight().lock().unwrap().insert(
-            tx.compute_txid().to_string(),
+            tx.txid().to_string(),
             InFlight {
                 wallet: wallet.to_string(),
                 tx_hex: tx_hex.to_string(),
@@ -50,11 +50,12 @@ pub(crate) fn stash_in_flight(wallet: &str, tx_hex: &str, replaces: Option<&str>
 /// record upserts over the row within seconds — `or_insert` keeps whichever
 /// arrived first).
 fn apply_local_spend(txid: &str) {
-    use bitcoin::consensus::encode::deserialize_hex;
+    use dannesk_btc_codec::address::Address;
+    use dannesk_btc_codec::tx::Transaction;
     let Some(InFlight { wallet, tx_hex, replaces }) = in_flight().lock().unwrap().remove(txid) else {
         return;
     };
-    let Ok(tx) = deserialize_hex::<bitcoin::Transaction>(&tx_hex) else {
+    let Ok(tx) = Transaction::from_hex(&tx_hex) else {
         return;
     };
     let spent: Vec<(String, u32)> = tx
@@ -66,13 +67,12 @@ fn apply_local_spend(txid: &str) {
     // output is tagged with the member address that owns it — an untagged (or
     // primary-mistagged) coin would later sign with the wrong key.
     let records = crate::wallet::btc_address_records();
-    let owner_of = |spk: &bitcoin::Script| -> Option<String> {
-        bitcoin::Address::from_script(spk, bitcoin::Network::Bitcoin)
-            .ok()
+    let owner_of = |spk: &[u8]| -> Option<String> {
+        Address::from_script(spk)
             .map(|a| a.to_string())
             .filter(|a| records.iter().any(|r| r.address == *a))
     };
-    let ours = |spk: &bitcoin::Script| owner_of(spk).is_some();
+    let ours = |spk: &[u8]| owner_of(spk).is_some();
 
     let mut spent_sats = 0u64;
     // The coins leaving, with value and owner — the body of the pending row
@@ -111,7 +111,7 @@ fn apply_local_spend(txid: &str) {
                 set.push(BtcUtxo {
                     txid: txid.to_string(),
                     vout: vout as u32,
-                    sats: out.value.to_sat(),
+                    sats: out.value,
                     height: 0,
                     address: owner,
                     spent_by: None,
@@ -126,18 +126,14 @@ fn apply_local_spend(txid: &str) {
         .output
         .iter()
         .filter(|o| !ours(&o.script_pubkey))
-        .map(|o| o.value.to_sat())
+        .map(|o| o.value)
         .sum();
-    let fee_sats = spent_sats.saturating_sub(tx.output.iter().map(|o| o.value.to_sat()).sum());
+    let fee_sats = spent_sats.saturating_sub(tx.output.iter().map(|o| o.value).sum());
     let receivers: Vec<String> = tx
         .output
         .iter()
         .filter(|o| !ours(&o.script_pubkey))
-        .filter_map(|o| {
-            bitcoin::Address::from_script(&o.script_pubkey, bitcoin::Network::Bitcoin)
-                .ok()
-                .map(|a| a.to_string())
-        })
+        .filter_map(|o| Address::from_script(&o.script_pubkey).map(|a| a.to_string()))
         .collect();
     // Only a complete body is worth carrying: every input must have been in
     // the local set — which an ordinary send and a replacement both satisfy
@@ -149,14 +145,12 @@ fn apply_local_spend(txid: &str) {
         .enumerate()
         .map(|(vout, o)| crate::channel::BtcRbfOutput {
             vout: vout as u32,
-            sats: o.value.to_sat(),
-            address: bitcoin::Address::from_script(&o.script_pubkey, bitcoin::Network::Bitcoin)
-                .ok()
-                .map(|a| a.to_string()),
-            spk: Some(o.script_pubkey.to_hex_string()),
+            sats: o.value,
+            address: Address::from_script(&o.script_pubkey).map(|a| a.to_string()),
+            spk: Some(hex::encode(&o.script_pubkey)),
         })
         .collect();
-    let vsize = Some(tx.vsize() as u64);
+    let vsize = Some(tx.vsize());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -1,41 +1,46 @@
 use crate::decrypt::decrypt_data;
 use crate::bridge::json_storage::read_json;
-use bip39::Mnemonic;
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::key::{CompressedPublicKey, PrivateKey};
-use bitcoin::network::Network;
-use bitcoin::secp256k1::Secp256k1;
-use bitcoin::Address;
+use dannesk_btc_codec::address::Address;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
+use dannesk_btc_codec::secp256k1::SecretKey;
 use serde::Deserialize;
-use std::str::FromStr;
+use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::secure::{SecureBytes, SecureString};
 
-/// The authenticated wallet: the primary (#0) identity plus one WIF per
-/// watched address record. HD wallets hold coins on several derived addresses
-/// of one seed; every input is signed with ITS owner's key, looked up here.
-/// Keys live in `Zeroizing` and the map is private — they move out of this
-/// module only as borrowed WIF strings at signing time.
-#[derive(Debug)]
+/// The authenticated wallet: the primary (#0) identity plus one secret key
+/// per watched address record. HD wallets hold coins on several derived
+/// addresses of one seed; every input is signed with ITS owner's key, looked
+/// up here. Keys live in `Zeroizing` and the map is private — they leave this
+/// module only as a key built for one signature.
 pub struct BitcoinWallet {
     /// #0 — the identity the flow validated against, and the change target.
     pub address: String,
-    keys: std::collections::HashMap<String, Zeroizing<String>>,
+    keys: std::collections::HashMap<String, Zeroizing<[u8; 32]>>,
+}
+
+impl fmt::Debug for BitcoinWallet {
+    /// The identity and the key count, never a key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BitcoinWallet({}, {} keys)", self.address, self.keys.len())
+    }
 }
 
 impl BitcoinWallet {
-    pub fn wif_for(&self, address: &str) -> Option<&str> {
-        self.keys.get(address).map(|w| w.as_str())
+    /// The key that signs for `address`, if this wallet holds it.
+    pub fn key_for(&self, address: &str) -> Option<SecretKey> {
+        self.keys.get(address).and_then(|k| SecretKey::from_secret_bytes(**k).ok())
     }
 
-    /// A wallet from bare (address, WIF) pairs — the signer's tests build
-    /// one key per script family without a seed or a btc.json.
+    /// A wallet from bare (address, key) pairs — the signer's tests build one
+    /// key per script family without a seed or a btc.json.
     #[cfg(test)]
-    pub(crate) fn for_test(address: String, keys: Vec<(String, String)>) -> Self {
+    pub(crate) fn for_test(address: String, keys: Vec<(String, [u8; 32])>) -> Self {
         Self {
             address,
-            keys: keys.into_iter().map(|(a, w)| (a, Zeroizing::new(w))).collect(),
+            keys: keys.into_iter().map(|(a, k)| (a, Zeroizing::new(k))).collect(),
         }
     }
 }
@@ -76,7 +81,7 @@ pub fn authenticate_wallet(
         _ => return Err("Error: Must provide exactly one of passphrase or seed".to_string()),
     };
 
-    let mnemonic = Mnemonic::from_str(mnemonic_text.as_str())
+    let mnemonic = Mnemonic::parse(mnemonic_text.as_str())
         .map_err(|e| format!("Error: Invalid mnemonic: {}", e))?;
 
     let seed_passphrase = bip39.as_ref().map(|s| s.as_str()).unwrap_or("");
@@ -85,18 +90,13 @@ pub fn authenticate_wallet(
     let seed_bytes = SecureBytes::new(seed_arr.to_vec());
     seed_arr.zeroize();
 
-    let network = Network::Bitcoin;
-    let secp = Secp256k1::new();
-
-    let xpriv = Xpriv::new_master(network, seed_bytes.as_bytes())
+    let xpriv = Xpriv::new_master(seed_bytes.as_bytes())
         .map_err(|e| format!("Error: Failed to create master key: {}", e))?;
 
-    let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
+    let derivation_path: DerivationPath = "m/84'/0'/0'/0/0".parse().unwrap();
     let child_xpriv = xpriv
-        .derive_priv(&secp, &derivation_path)
+        .derive(&derivation_path)
         .map_err(|e| format!("Error: Failed to derive private key: {}", e))?;
-
-    let private_key = child_xpriv.to_priv();
 
     // Prove the key we just built belongs to the wallet we were asked to open.
     //
@@ -112,24 +112,23 @@ pub fn authenticate_wallet(
     // `reimport_key` has always checked this (bridge/btc_wallet_operations.rs);
     // the signing path never did. Same derivation, same comparison, so the two
     // cannot disagree about what "this wallet" means.
-    let derived_address =
-        Address::p2wpkh(&CompressedPublicKey(private_key.public_key(&secp).inner), network)
-            .to_string();
+    let derived_address = Address::p2wpkh(&child_xpriv.public_key()).to_string();
 
     // The other three address types (2026-09-14): #0 at the STORED type's
     // purpose and encoding. Native keeps the frozen block above verbatim;
     // the comparison below then proves the stored type against the seed the
     // same way it proves the 25th word.
     let script_type = crate::btc_script_type::stored();
-    let (private_key, derived_address) = match script_type {
-        crate::btc_script_type::BtcScriptType::NativeSegwit => (private_key, derived_address),
+    let (secret, derived_address) = match script_type {
+        crate::btc_script_type::BtcScriptType::NativeSegwit => {
+            (Zeroizing::new(child_xpriv.secret_key().to_secret_bytes()), derived_address)
+        }
         other => {
             let child = xpriv
-                .derive_priv(&secp, &other.member_path(0, 0))
+                .derive(&other.member_path(0, 0))
                 .map_err(|e| format!("Error: Failed to derive private key: {}", e))?;
-            let key = child.to_priv();
-            let address = other.address(&secp, &CompressedPublicKey(key.public_key(&secp).inner)).to_string();
-            (key, address)
+            let address = other.address(&child.public_key()).to_string();
+            (Zeroizing::new(child.secret_key().to_secret_bytes()), address)
         }
     };
     if !wallet_address.is_empty() && derived_address != wallet_address {
@@ -138,15 +137,8 @@ pub fn authenticate_wallet(
         );
     }
 
-    let private_key_wif = PrivateKey {
-        compressed: true,
-        network: bitcoin::network::NetworkKind::Main,
-        inner: private_key.inner,
-    }
-    .to_wif();
-
     let mut keys = std::collections::HashMap::new();
-    keys.insert(derived_address.clone(), Zeroizing::new(private_key_wif));
+    keys.insert(derived_address.clone(), secret);
 
     // HD members: one key per btc.json record beyond #0, each derived at ITS
     // recorded (chain, index) and verified against the recorded address before
@@ -161,25 +153,16 @@ pub fn authenticate_wallet(
         }
         let member_path = script_type.member_path(record.chain, record.index);
         let member_xpriv = xpriv
-            .derive_priv(&secp, &member_path)
+            .derive(&member_path)
             .map_err(|e| format!("Error: member key derivation failed: {}", e))?;
-        let member_key = member_xpriv.to_priv();
-        let member_address = script_type
-            .address(&secp, &CompressedPublicKey(member_key.public_key(&secp).inner))
-            .to_string();
+        let member_address = script_type.address(&member_xpriv.public_key()).to_string();
         if member_address != record.address {
             return Err(format!(
                 "Error: derived address for {}/{} does not match the stored wallet",
                 record.chain, record.index
             ));
         }
-        let member_wif = PrivateKey {
-            compressed: true,
-            network: bitcoin::network::NetworkKind::Main,
-            inner: member_key.inner,
-        }
-        .to_wif();
-        keys.insert(member_address, Zeroizing::new(member_wif));
+        keys.insert(member_address, Zeroizing::new(member_xpriv.secret_key().to_secret_bytes()));
     }
 
     // Backfill: a wallet imported before the HD work has no account xpub on
@@ -191,10 +174,11 @@ pub fn authenticate_wallet(
     if let Ok(stored) = stored
         && stored.get("account_xpub").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty())
     {
-        let account_xpriv = xpriv
-            .derive_priv(&secp, &script_type.account_path())
-            .map_err(|e| format!("Error: account derivation failed: {}", e))?;
-        let account_xpub = bitcoin::bip32::Xpub::from_priv(&secp, &account_xpriv).to_string();
+        let account_xpub = xpriv
+            .derive(&script_type.account_path())
+            .map_err(|e| format!("Error: account derivation failed: {}", e))?
+            .to_xpub()
+            .to_string();
         let _ = crate::bridge::json_storage::update_json("btc.json", |data: &mut serde_json::Value| {
             if let Some(obj) = data.as_object_mut() {
                 obj.insert("account_xpub".to_string(), serde_json::Value::String(account_xpub.clone()));

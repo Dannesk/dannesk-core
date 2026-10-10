@@ -2,7 +2,7 @@ use crate::channel::WSCommand;
 use dannesk_xrpl_codec::Field;
 use crate::ws::commands::{offer_cancel, offer_create, payment, trustset};
 use crate::ws::commands::wallet_auth::Bip44Wallet;
-use bitcoin::secp256k1::{Message, Secp256k1};
+use dannesk_btc_codec::secp256k1::Message;
 
 pub async fn construct_blob(
     wallet_obj: &Bip44Wallet,
@@ -32,8 +32,8 @@ pub fn sign(wallet_obj: &Bip44Wallet, mut fields: Vec<Field>) -> Result<String, 
     fields.push(dannesk_xrpl_codec::signing_pub_key(&wallet_obj.public_key.serialize()));
     let digest = dannesk_xrpl_codec::signing_hash(&fields)?;
 
-    // sign_ecdsa gives the low-S (canonical) signature the ledger requires.
-    let sig = Secp256k1::new().sign_ecdsa(&Message::from_digest(digest), &wallet_obj.secret_key);
+    // libsecp256k1 gives the low-S (canonical) signature the ledger requires.
+    let sig = wallet_obj.secret_key.sign_ecdsa(Message::from_digest(digest));
     fields.push(dannesk_xrpl_codec::txn_signature(&sig.serialize_der()));
 
     Ok(hex::encode_upper(dannesk_xrpl_codec::encode(&fields)?))
@@ -43,16 +43,15 @@ pub fn sign(wallet_obj: &Bip44Wallet, mut fields: Vec<Field>) -> Result<String, 
 mod tests {
     use super::*;
     use dannesk_xrpl_codec::TransactionType;
-    use bitcoin::secp256k1::{ecdsa::Signature, PublicKey, SecretKey};
+    use dannesk_btc_codec::secp256k1::{ecdsa::Signature, PublicKey, SecretKey};
 
     #[test]
     fn the_signature_covers_the_key_and_verifies() {
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let secret_key = SecretKey::from_secret_bytes([0x11; 32]).unwrap();
         let wallet = Bip44Wallet {
             address: "rLSn6Z3T8uCxbcd1oxwfGQN1Fdn5CyGujK".to_string(),
             secret_key,
-            public_key: PublicKey::from_secret_key(&secp, &secret_key),
+            public_key: PublicKey::from_secret_key(&secret_key),
         };
         let fields = || {
             vec![
@@ -82,7 +81,7 @@ mod tests {
         let mut with_key = fields();
         with_key.push(dannesk_xrpl_codec::signing_pub_key(&key));
         let digest = dannesk_xrpl_codec::signing_hash(&with_key).unwrap();
-        assert!(secp.verify_ecdsa(&Message::from_digest(digest), &sig, &wallet.public_key).is_ok());
+        assert!(sig.verify(Message::from_digest(digest), &wallet.public_key).is_ok());
         let mut low_s = sig;
         low_s.normalize_s();
         assert_eq!(low_s, sig);

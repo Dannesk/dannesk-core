@@ -37,8 +37,7 @@
 
 use crate::bridge::json_storage;
 use crate::channel::CHANNEL;
-use bitcoin::bip32::{ChildNumber, Xpub};
-use bitcoin::secp256k1::Secp256k1;
+use dannesk_btc_codec::bip32::Xpub;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
@@ -232,7 +231,6 @@ fn ensure_rotating_address(chain: u32, counter_key: &'static str) -> Option<Stri
         .and_then(|v| v.as_str())
         .and_then(crate::btc_script_type::BtcScriptType::from_tag)
         .unwrap_or_default();
-    let secp = Secp256k1::verification_only();
 
     let mut records = crate::wallet::btc_address_records();
     if records.is_empty() {
@@ -259,16 +257,8 @@ fn ensure_rotating_address(chain: u32, counter_key: &'static str) -> Option<Stri
         let offered = match records.iter().find(|r| r.chain == chain && r.index == index) {
             Some(r) => r.address.clone(),
             None => {
-                let child = xpub
-                    .derive_pub(
-                        &secp,
-                        &[
-                            ChildNumber::from_normal_idx(chain).ok()?,
-                            ChildNumber::from_normal_idx(index).ok()?,
-                        ],
-                    )
-                    .ok()?;
-                let address = script_type.address(&secp, &child.to_pub()).to_string();
+                let child = xpub.derive(&[chain, index]).ok()?;
+                let address = script_type.address(child.public_key()).to_string();
                 // Persist BEFORE handing it out: an address on screen — or in
                 // a change output — that btc.json doesn't know is a payment
                 // the signer could never spend. The same write advances the
@@ -330,17 +320,8 @@ pub fn derive_member(
     index: u32,
 ) -> Option<String> {
     let xpub = Xpub::from_str(account_xpub).ok()?;
-    let secp = Secp256k1::verification_only();
-    let child = xpub
-        .derive_pub(
-            &secp,
-            &[
-                ChildNumber::from_normal_idx(chain).ok()?,
-                ChildNumber::from_normal_idx(index).ok()?,
-            ],
-        )
-        .ok()?;
-    Some(script_type.address(&secp, &child.to_pub()).to_string())
+    let child = xpub.derive(&[chain, index]).ok()?;
+    Some(script_type.address(child.public_key()).to_string())
 }
 
 /// Send the wallet's LIVE list — whole, replacing the last one (the Bitcoin

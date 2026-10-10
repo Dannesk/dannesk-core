@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
-description = "Communication layer."
+description = "Communication layer"
 repository = "https://github.com/Dannesk/dannesk-core"
 publish = false
 
@@ -12,6 +12,7 @@ publish = false
 # Our MIT crates, each in its own repository, pinned to a commit until they
 # are on crates.io.
 dannesk-xrpl-codec = { git = "https://github.com/Dannesk/dannesk-xrpl-codec", rev = "7a9243bce1905fedcac38b986e0e321c52db4c1f" }
+dannesk-btc-codec = { git = "https://github.com/Dannesk/dannesk-btc-codec", rev = "a5922c97c92834c85ffe72bbfadc49e72896e6bf" }
 dannesk-noise-protocol = { git = "https://github.com/Dannesk/dannesk-noise-protocol", rev = "6d7671a7e45b3e7d07c0716c1fcf6bf03dbab220", features = ["tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -19,9 +20,6 @@ tokio = { version = "1.53.2", features = ["full"] }
 tungstenite = { version = "0.30.0", default-features = false }  # its Message type alone: the frames queued for the socket
 uuid = { version = "1.27.0", features = ["v4"] }
 zeroize = { version = "1.9", features = ["derive", "serde"] }
-bitcoin = "0.32.102"
-secp256k1 = "0.33.1"
-bip39 = "3.0.0"
 aes-gcm = "0.11.1"
 rand = "0.10.3"
 base64 = "0.23.1"

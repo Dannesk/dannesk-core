@@ -3,11 +3,9 @@
 use crate::channel::{BtcTransactionState, CHANNEL, ActivityLogState, WSCommand};
 use crate::bridge::json_storage::{self, get_config_path, remove_json, write_json};
 use crate::encrypt::encrypt_data;
-use bip39::{Language, Mnemonic};
-use bitcoin::address::Address;
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{CompressedPublicKey, Network};
+use dannesk_btc_codec::address::Address;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
 use serde::Serialize;
 use std::str::FromStr;
 use std::time::Duration;
@@ -63,25 +61,21 @@ impl BitcoinWalletOperations {
         let script_type = crate::btc_script_type::stored();
         let result = tokio::task::spawn_blocking(
             move || -> Result<(String, String, String, String, String), String> {
-                let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase.as_str())
+                let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
                     .map_err(|e| format!("Invalid recovery phrase: {}", e))?;
 
                 let mut seed = mnemonic.to_seed(bip39_pass.as_str());
-                let secp = Secp256k1::new();
-                let network = Network::Bitcoin;
 
-                let xpriv = Xpriv::new_master(network, &seed)
+                let xpriv = Xpriv::new_master(&seed)
                     .map_err(|e| { seed.zeroize(); format!("Key derivation failed: {}", e) })?;
                 seed.zeroize();
 
                 let path = DerivationPath::from_str("m/84'/0'/0'/0/0")
                     .map_err(|_| "Invalid derivation path".to_string())?;
-                let child = xpriv.derive_priv(&secp, &path)
+                let child = xpriv.derive(&path)
                     .map_err(|e| format!("Derivation failed: {}", e))?;
 
-                let public_key = child.to_priv().public_key(&secp);
-                let compressed_pubkey = CompressedPublicKey(public_key.inner);
-                let derived_address = Address::p2wpkh(&compressed_pubkey, network).to_string();
+                let derived_address = Address::p2wpkh(&child.public_key()).to_string();
 
                 // The other three address types (2026-09-14): #0 at the
                 // stored type's purpose and encoding. Native keeps the frozen
@@ -90,10 +84,9 @@ impl BitcoinWalletOperations {
                     crate::btc_script_type::BtcScriptType::NativeSegwit => derived_address,
                     other => {
                         let child = xpriv
-                            .derive_priv(&secp, &other.member_path(0, 0))
+                            .derive(&other.member_path(0, 0))
                             .map_err(|e| format!("Derivation failed: {}", e))?;
-                        let pk = CompressedPublicKey(child.to_priv().public_key(&secp).inner);
-                        other.address(&secp, &pk).to_string()
+                        other.address(&child.public_key()).to_string()
                     }
                 };
 
@@ -104,11 +97,11 @@ impl BitcoinWalletOperations {
                 // Neutered account key for receive rotation — backfilled below
                 // if btc.json predates the HD work. NEW site; the #0 block
                 // above is frozen.
-                let account_xpriv = xpriv
-                    .derive_priv(&secp, &script_type.account_path())
-                    .map_err(|e| format!("Account derivation failed: {}", e))?;
-                let account_xpub =
-                    bitcoin::bip32::Xpub::from_priv(&secp, &account_xpriv).to_string();
+                let account_xpub = xpriv
+                    .derive(&script_type.account_path())
+                    .map_err(|e| format!("Account derivation failed: {}", e))?
+                    .to_xpub()
+                    .to_string();
 
                 let (enc, salt, iv) = encrypt_data(encryption_pass.as_str(), mnemonic_phrase.as_str())
                     .map_err(|e| format!("Encryption failed: {}", e))?;

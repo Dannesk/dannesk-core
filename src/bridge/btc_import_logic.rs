@@ -2,11 +2,9 @@ use crate::btc_script_type::BtcScriptType;
 use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
 use crate::wallet::ImportMode;
 use crate::encrypt::encrypt_data;
-use bip39::{Language, Mnemonic};
-use bitcoin::address::Address;
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::Secp256k1;
-use bitcoin::{CompressedPublicKey, Network};
+use dannesk_btc_codec::address::Address;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
 use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
 use zeroize::Zeroize;
@@ -58,29 +56,25 @@ impl BTCImportLogic {
         // no unlocked copy. They zeroize + unlock when the closure returns.
         let crypto_result = tokio::task::spawn_blocking(
             move || -> Result<Prepared, String> {
-                let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase.as_str())
+                let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
                     .map_err(|e| format!("Invalid mnemonic: {}", e))?;
 
                 let mut seed_arr = mnemonic.to_seed(bip39_pass.as_str());
                 // Hold the raw seed in mlocked memory; wipe the transient stack array.
                 let seed = SecureBytes::new(seed_arr.to_vec());
                 seed_arr.zeroize();
-                let network = Network::Bitcoin;
-                let secp = Secp256k1::new();
 
-                let xpriv = Xpriv::new_master(network, seed.as_bytes())
+                let xpriv = Xpriv::new_master(seed.as_bytes())
                     .map_err(|e| format!("Failed to create master key: {}", e))?;
 
                 let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0")
                     .map_err(|_| "Invalid derivation path".to_string())?;
 
                 let child_xpriv = xpriv
-                    .derive_priv(&secp, &derivation_path)
+                    .derive(&derivation_path)
                     .map_err(|e| format!("Derivation failed: {}", e))?;
 
-                let public_key = child_xpriv.to_priv().public_key(&secp);
-                let compressed_pubkey = CompressedPublicKey(public_key.inner);
-                let address = Address::p2wpkh(&compressed_pubkey, network);
+                let address = Address::p2wpkh(&child_xpriv.public_key());
 
                 // The other three address types (2026-09-14): #0 at THEIR
                 // purpose and encoding. Native keeps the frozen block above
@@ -90,10 +84,9 @@ impl BTCImportLogic {
                     BtcScriptType::NativeSegwit => address,
                     other => {
                         let child = xpriv
-                            .derive_priv(&secp, &other.member_path(0, 0))
+                            .derive(&other.member_path(0, 0))
                             .map_err(|e| format!("Derivation failed: {}", e))?;
-                        let pk = CompressedPublicKey(child.to_priv().public_key(&secp).inner);
-                        other.address(&secp, &pk)
+                        other.address(&child.public_key())
                     }
                 };
 
@@ -103,12 +96,11 @@ impl BTCImportLogic {
                 // no longer derives an address window to send. A NEW
                 // derivation site, self-contained on purpose (the #0 path
                 // above is frozen and stays byte-for-byte as it was).
-                let account_path = script_type.account_path();
-                let account_xpriv = xpriv
-                    .derive_priv(&secp, &account_path)
-                    .map_err(|e| format!("Account derivation failed: {}", e))?;
-                let account_xpub =
-                    bitcoin::bip32::Xpub::from_priv(&secp, &account_xpriv).to_string();
+                let account_xpub = xpriv
+                    .derive(&script_type.account_path())
+                    .map_err(|e| format!("Account derivation failed: {}", e))?
+                    .to_xpub()
+                    .to_string();
                 // Per-mode key protection. The address above is derived for all
                 // three; only what we persist differs.
                 let (encrypted_phrase, salt, iv, method) = match mode {

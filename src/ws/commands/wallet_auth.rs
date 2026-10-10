@@ -1,12 +1,11 @@
 use crate::decrypt::decrypt_data;
 use crate::bridge::json_storage::read_json;
-use bip39::{Language, Mnemonic};
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
+use dannesk_btc_codec::secp256k1::{PublicKey, SecretKey};
 use ripemd::Ripemd160;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::str::FromStr;
 use zeroize::Zeroize;
 
 use crate::secure::{SecureBytes, SecureString};
@@ -54,7 +53,7 @@ pub fn authenticate_wallet(
         _ => return Err("Error: Must provide exactly one of passphrase or seed".to_string()),
     };
 
-    let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_text.as_str())
+    let mnemonic = Mnemonic::parse(mnemonic_text.as_str())
         .map_err(|_| "Error: Invalid mnemonic".to_string())?;
 
     let seed_passphrase = bip39.as_ref().map(|s| s.as_str()).unwrap_or("");
@@ -63,21 +62,20 @@ pub fn authenticate_wallet(
     let bip39_seed = SecureBytes::new(seed_arr.to_vec());
     seed_arr.zeroize();
 
-    let secp = Secp256k1::new();
-
     // `bip39_seed` is zeroized + unlocked when it drops at end of scope.
-    let xpriv = Xpriv::new_master(bitcoin::Network::Bitcoin, bip39_seed.as_bytes())
+    let xpriv = Xpriv::new_master(bip39_seed.as_bytes())
         .map_err(|e| format!("Error: Failed to create master key: {}", e))?;
 
-    let path = DerivationPath::from_str("m/44'/144'/0'/0/0")
+    let path: DerivationPath = "m/44'/144'/0'/0/0"
+        .parse()
         .map_err(|_| "Error: Invalid derivation path".to_string())?;
 
     let child_xpriv = xpriv
-        .derive_priv(&secp, &path)
+        .derive(&path)
         .map_err(|e| format!("Error: Derivation failed: {}", e))?;
 
-    let secret_key = child_xpriv.private_key;
-    let public_key = child_xpriv.to_priv().public_key(&secp).inner;
+    let secret_key = *child_xpriv.secret_key();
+    let public_key = child_xpriv.public_key();
 
     // Prove the key we just built belongs to the wallet we were asked to open.
     //

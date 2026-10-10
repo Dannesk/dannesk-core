@@ -1,9 +1,8 @@
 use crate::channel::{CHANNEL, ActivityLogState, TransactionState, WSCommand};
 use crate::bridge::json_storage::{self, get_config_path, remove_json, write_json};
 use crate::encrypt::encrypt_data;
-use bip39::{Language, Mnemonic};
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::Secp256k1;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
 use ripemd::Ripemd160;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -60,22 +59,21 @@ impl WalletOperations {
         let expected = expected_address.clone();
         let result = tokio::task::spawn_blocking(
             move || -> Result<(String, String, String, String), String> {
-                let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase.as_str())
+                let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
                     .map_err(|e| format!("Invalid recovery phrase: {}", e))?;
 
                 let mut seed = mnemonic.to_seed(bip39_pass.as_str());
-                let secp = Secp256k1::new();
 
-                let xpriv = Xpriv::new_master(bitcoin::Network::Bitcoin, &seed)
+                let xpriv = Xpriv::new_master(&seed)
                     .map_err(|e| { seed.zeroize(); format!("Key derivation failed: {}", e) })?;
                 seed.zeroize();
 
                 let path = DerivationPath::from_str("m/44'/144'/0'/0/0")
                     .map_err(|_| "Invalid derivation path".to_string())?;
-                let child = xpriv.derive_priv(&secp, &path)
+                let child = xpriv.derive(&path)
                     .map_err(|e| format!("Derivation failed: {}", e))?;
 
-                let pk_bytes = child.to_priv().public_key(&secp).inner.serialize();
+                let pk_bytes = child.public_key().serialize();
                 let rip_hash = Ripemd160::digest(Sha256::digest(pk_bytes));
                 let mut account_id = [0u8; 21];
                 account_id[0] = 0x00;

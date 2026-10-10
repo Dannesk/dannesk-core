@@ -11,7 +11,7 @@
 //! - the size of the change output (this wallet's own script).
 //!
 //! What it does NOT decide: how an input is signed. The signer reads the
-//! owner address of every coin and branches on the script the crate parses
+//! owner address of every coin and branches on the script the codec parses
 //! out of it ([`BtcScriptType::of_address`]) — the address is
 //! self-describing, so signing never trusts a stored field. A test pins the
 //! two views to each other.
@@ -22,12 +22,9 @@
 //! Native is the default for a btc.json that has no `script_type` field, so
 //! every wallet that exists today reads as exactly what it was.
 
-use bitcoin::address::AddressType;
-use bitcoin::bip32::DerivationPath;
-use bitcoin::key::UntweakedPublicKey;
-use bitcoin::secp256k1::{Secp256k1, Verification};
-use bitcoin::{Address, CompressedPublicKey, Network};
-use std::str::FromStr;
+use dannesk_btc_codec::address::{Address, Kind};
+use dannesk_btc_codec::bip32::DerivationPath;
+use dannesk_btc_codec::secp256k1::PublicKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BtcScriptType {
@@ -122,40 +119,38 @@ impl BtcScriptType {
 
     /// `m/{purpose}'/0'/0'` — where the account xpub lives.
     pub fn account_path(self) -> DerivationPath {
-        DerivationPath::from_str(&format!("m/{}'/0'/0'", self.purpose()))
+        format!("m/{}'/0'/0'", self.purpose())
+            .parse()
             .expect("account path is a literal")
     }
 
     /// `m/{purpose}'/0'/0'/{chain}/{index}` — one member address.
     pub fn member_path(self, chain: u32, index: u32) -> DerivationPath {
-        DerivationPath::from_str(&format!("m/{}'/0'/0'/{}/{}", self.purpose(), chain, index))
+        format!("m/{}'/0'/0'/{}/{}", self.purpose(), chain, index)
+            .parse()
             .expect("member path is a literal with two indices")
     }
 
-    /// Encode a derived compressed public key as this type's address.
-    pub fn address<C: Verification>(self, secp: &Secp256k1<C>, pk: &CompressedPublicKey) -> Address {
+    /// Encode a derived public key as this type's address.
+    pub fn address(self, key: &PublicKey) -> Address {
         match self {
-            Self::NativeSegwit => Address::p2wpkh(pk, Network::Bitcoin),
-            Self::Taproot => {
-                let internal: UntweakedPublicKey = pk.0.into();
-                Address::p2tr(secp, internal, None, Network::Bitcoin)
-            }
-            Self::NestedSegwit => Address::p2shwpkh(pk, Network::Bitcoin),
-            Self::Legacy => Address::p2pkh(pk, Network::Bitcoin),
+            Self::NativeSegwit => Address::p2wpkh(key),
+            Self::Taproot => Address::p2tr(&key.x_only_public_key().0),
+            Self::NestedSegwit => Address::p2sh_p2wpkh(key),
+            Self::Legacy => Address::p2pkh(key),
         }
     }
 
-    /// The type an address string is, as the crate parses it. `None` for
-    /// anything this wallet cannot own (P2WSH, P2A, a foreign network, or
-    /// not an address at all).
+    /// The type an address string is, as the codec parses it. `None` for
+    /// anything this wallet cannot own (P2WSH, a future witness version, a
+    /// foreign network, or not an address at all).
     pub fn of_address(address: &str) -> Option<Self> {
-        let addr = Address::from_str(address).ok()?.require_network(Network::Bitcoin).ok()?;
-        match addr.address_type()? {
-            AddressType::P2wpkh => Some(Self::NativeSegwit),
-            AddressType::P2tr => Some(Self::Taproot),
-            AddressType::P2sh => Some(Self::NestedSegwit),
-            AddressType::P2pkh => Some(Self::Legacy),
-            _ => None,
+        match Address::parse(address).ok()?.kind() {
+            Kind::P2wpkh => Some(Self::NativeSegwit),
+            Kind::P2tr => Some(Self::Taproot),
+            Kind::P2sh => Some(Self::NestedSegwit),
+            Kind::P2pkh => Some(Self::Legacy),
+            Kind::P2wsh | Kind::OtherWitness => None,
         }
     }
 
@@ -212,20 +207,18 @@ pub fn stored() -> BtcScriptType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bip39::{Language, Mnemonic};
-    use bitcoin::bip32::Xpriv;
+    use dannesk_btc_codec::bip32::Xpriv;
+    use dannesk_btc_codec::bip39::Mnemonic;
 
     /// The BIP-39 test mnemonic every BIP's own vectors use.
     const ABANDON: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     fn first_address(t: BtcScriptType) -> String {
-        let secp = Secp256k1::new();
-        let seed = Mnemonic::parse_in(Language::English, ABANDON).unwrap().to_seed("");
-        let master = Xpriv::new_master(Network::Bitcoin, &seed).unwrap();
-        let child = master.derive_priv(&secp, &t.member_path(0, 0)).unwrap();
-        let pk = CompressedPublicKey(child.to_priv().public_key(&secp).inner);
-        t.address(&secp, &pk).to_string()
+        let seed = Mnemonic::parse(ABANDON).unwrap().to_seed("");
+        let master = Xpriv::new_master(&seed).unwrap();
+        let child = master.derive(&t.member_path(0, 0)).unwrap();
+        t.address(&child.public_key()).to_string()
     }
 
     /// The first receive address of each type, against the vectors the BIPs
@@ -257,7 +250,7 @@ mod tests {
     #[test]
     fn spk_lengths_are_the_real_scripts() {
         for t in BtcScriptType::IMPORT {
-            let addr = Address::from_str(&first_address(t)).unwrap().assume_checked();
+            let addr = Address::parse(&first_address(t)).unwrap();
             assert_eq!(addr.script_pubkey().len(), t.spk_len(), "{t:?}");
         }
     }
@@ -275,7 +268,7 @@ mod tests {
     fn paths_carry_the_purpose() {
         for t in BtcScriptType::IMPORT {
             assert_eq!(t.path(), format!("m/{}'/0'/0'/0/0", t.purpose()));
-            assert_eq!(t.member_path(0, 0).to_string(), t.path().trim_start_matches("m/"));
+            assert_eq!(t.member_path(0, 0).to_string(), t.path());
         }
     }
 }

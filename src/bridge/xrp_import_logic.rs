@@ -2,9 +2,8 @@
 use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
 use crate::wallet::ImportMode;
 use crate::encrypt::encrypt_data;
-use bip39::{Language, Mnemonic};
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::Secp256k1;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
 use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
 use zeroize::Zeroize;
@@ -49,27 +48,25 @@ impl XRPImportLogic {
         // no unlocked copy. They zeroize + unlock when the closure returns.
         let crypto_result = tokio::task::spawn_blocking(
             move || -> Result<Prepared, String> {
-                let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_phrase.as_str())
+                let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
                     .map_err(|e| format!("Invalid mnemonic: {}", e))?;
 
                 let mut seed_arr = mnemonic.to_seed(bip39_pass.as_str());
                 // Hold the raw seed in mlocked memory; wipe the transient stack array.
                 let seed = SecureBytes::new(seed_arr.to_vec());
                 seed_arr.zeroize();
-                let secp = Secp256k1::new();
 
-                let xpriv = Xpriv::new_master(bitcoin::Network::Bitcoin, seed.as_bytes())
+                let xpriv = Xpriv::new_master(seed.as_bytes())
                     .map_err(|e| format!("Failed to create master key: {}", e))?;
 
                 let path = DerivationPath::from_str("m/44'/144'/0'/0/0")
                     .map_err(|_| "Invalid derivation path".to_string())?;
 
                 let child_xpriv = xpriv
-                    .derive_priv(&secp, &path)
+                    .derive(&path)
                     .map_err(|e| format!("Derivation failed: {}", e))?;
 
-                let public_key = child_xpriv.to_priv().public_key(&secp);
-                let pk_bytes = public_key.inner.serialize();
+                let pk_bytes = child_xpriv.public_key().serialize();
 
                 let sha_hash = Sha256::digest(pk_bytes);
                 let rip_hash = Ripemd160::digest(sha_hash);

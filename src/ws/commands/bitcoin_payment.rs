@@ -1,21 +1,10 @@
 use crate::btc_script_type::BtcScriptType;
 use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::commands::bitcoin_auth::BitcoinWallet;
-use bitcoin::CompressedPublicKey;
-use bitcoin::absolute::LockTime;
-use bitcoin::address::Address;
-use bitcoin::amount::Amount;
-use bitcoin::blockdata::script::ScriptBuf;
-use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxIn, TxOut};
-use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::hashes::Hash;
-use bitcoin::key::{Keypair, PrivateKey, TapTweak};
-use bitcoin::script::PushBytesBuf;
-use bitcoin::secp256k1::{Message, Secp256k1};
-use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
-use bitcoin::transaction::Version;
+use dannesk_btc_codec::address::Address;
+use dannesk_btc_codec::tx::{OutPoint, SEQUENCE_RBF, Transaction, TxIn, TxOut, Txid};
+use dannesk_btc_codec::{hash160, script, sighash, sign};
 use rand::RngExt;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Utxo {
@@ -196,6 +185,29 @@ pub fn select_utxos(utxos: &[Utxo], amount: u64, fee: u64) -> Result<Vec<Utxo>, 
     Ok(selected)
 }
 
+/// One unsigned input spending `utxo`: empty scriptSig, no witness, and the
+/// BIP125-replaceable sequence (0xfffffffd), not MAX. Our own node runs
+/// full-RBF so it would accept a replacement either way, but propagation
+/// would lean on every peer doing the same. Signalling it costs nothing here
+/// — `lock_time` is already ZERO, which is exactly the case this constant is
+/// named for.
+///
+/// Landed ahead of the bump-fee flow on purpose: it applies to new sends
+/// only, so any transaction broadcast before this point is one that cannot
+/// later be cheaply replaced.
+fn input_for(utxo: &Utxo) -> Result<TxIn, String> {
+    let txid: Txid = utxo
+        .txid
+        .parse()
+        .map_err(|e| format!("Invalid txid {}: {}", utxo.txid, e))?;
+    Ok(TxIn {
+        previous_output: OutPoint { txid, vout: utxo.vout },
+        script_sig: Vec::new(),
+        sequence: SEQUENCE_RBF,
+        witness: Vec::new(),
+    })
+}
+
 pub async fn construct_transaction(
     wallet_obj: &BitcoinWallet,
     cmd: &WSCommand,
@@ -248,46 +260,20 @@ pub async fn construct_transaction(
     let selected_utxos = select_utxos(&utxos, amount, fee)?;
     let total_input: u64 = selected_utxos.iter().map(|utxo| utxo.amount).sum();
 
-    // Parse recipient address
+    // Parse recipient address — mainnet only, any standard script.
     let recipient_addr =
-        Address::from_str(recipient).map_err(|e| format!("Invalid recipient address: {}", e))?;
-    let recipient_addr = recipient_addr
-        .require_network(bitcoin::Network::Bitcoin)
-        .map_err(|e| format!("Invalid network for recipient: {}", e))?;
+        Address::parse(recipient).map_err(|e| format!("Invalid recipient address: {}", e))?;
 
     // Create transaction inputs
-    let inputs: Vec<TxIn> = selected_utxos
-        .iter()
-        .map(|utxo| {
-            Ok(TxIn {
-                previous_output: OutPoint {
-                    txid: bitcoin::Txid::from_str(&utxo.txid)
-                        .map_err(|e| format!("Invalid txid {}: {}", utxo.txid, e))?,
-                    vout: utxo.vout,
-                },
-                script_sig: ScriptBuf::new(),
-                // BIP125-replaceable (0xfffffffd), not MAX. Our own node runs
-                // full-RBF so it would accept a replacement either way, but
-                // propagation would lean on every peer doing the same. Signalling
-                // it costs nothing here — `lock_time` is already ZERO, which is
-                // exactly the case this constant is named for.
-                //
-                // Landed ahead of the bump-fee flow on purpose: it applies to new
-                // sends only, so any transaction broadcast before this point is
-                // one that cannot later be cheaply replaced.
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::new(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let inputs: Vec<TxIn> = selected_utxos.iter().map(input_for).collect::<Result<Vec<_>, String>>()?;
 
     // Create transaction
     let mut tx = Transaction {
-        version: Version::TWO,
-        lock_time: LockTime::ZERO,
+        version: 2,
+        lock_time: 0,
         input: inputs,
         output: vec![TxOut {
-            value: Amount::from_sat(amount),
+            value: amount,
             script_pubkey: recipient_addr.script_pubkey(),
         }],
     };
@@ -295,13 +281,10 @@ pub async fn construct_transaction(
     // Add change output if necessary
     let change = total_input - amount - fee;
     if change > 0 {
-        let change_addr = Address::from_str(change_address)
+        let change_addr = Address::parse(change_address)
             .map_err(|e| format!("Invalid change address: {}", e))?;
-        let change_addr = change_addr
-            .require_network(bitcoin::Network::Bitcoin)
-            .map_err(|e| format!("Invalid network for wallet: {}", e))?;
         tx.output.push(TxOut {
-            value: Amount::from_sat(change),
+            value: change,
             script_pubkey: change_addr.script_pubkey(),
         });
     }
@@ -309,20 +292,19 @@ pub async fn construct_transaction(
     sign_inputs(&mut tx, &selected_utxos, wallet_obj)?;
 
     // Serialize transaction
-    let tx_hex = serialize_hex(&tx);
-    Ok(tx_hex)
+    Ok(tx.to_hex())
 }
 
 
 /// Sign every input of `tx` with ITS owner's key, in the script family the
 /// owner address IS. Inputs are positional 1:1 with `coins`, so the owner of
-/// input i is `coins[i].address`. Keys parse once per distinct owner; a coin
-/// whose owner has no key in the authenticated wallet fails the WHOLE build —
-/// a partially-signed transaction is not a smaller transaction, it is an
-/// invalid one. Shared by the send and the fee bump, which differ only in how
-/// the inputs and outputs were chosen.
+/// input i is `coins[i].address`. Keys are built once per distinct owner; a
+/// coin whose owner has no key in the authenticated wallet fails the WHOLE
+/// build — a partially-signed transaction is not a smaller transaction, it
+/// is an invalid one. Shared by the send and the fee bump, which differ only
+/// in how the inputs and outputs were chosen.
 ///
-/// The family comes from the address string, parsed by the crate — never from
+/// The family comes from the address string, parsed by the codec — never from
 /// btc.json's `script_type`. The address decides what script the network will
 /// check, so it is the only honest source; the stored type only ever decided
 /// how the address was derived. One wallet holds one family in practice, but
@@ -345,24 +327,21 @@ fn sign_inputs(
     if tx.input.len() != coins.len() {
         return Err("input/coin count mismatch".to_string());
     }
-    let secp = Secp256k1::new();
     struct Owner {
-        secret: bitcoin::secp256k1::SecretKey,
-        pk: CompressedPublicKey,
+        secret: dannesk_btc_codec::secp256k1::SecretKey,
+        pubkey: [u8; 33],
         kind: BtcScriptType,
-        spk: ScriptBuf,
+        spk: Vec<u8>,
     }
     let mut owners: std::collections::HashMap<String, Owner> = std::collections::HashMap::new();
     for coin in coins {
         if owners.contains_key(&coin.address) {
             continue;
         }
-        let wif = wallet_obj
-            .wif_for(&coin.address)
+        let secret = wallet_obj
+            .key_for(&coin.address)
             .ok_or_else(|| format!("No signing key for address {}", coin.address))?;
-        let private_key =
-            PrivateKey::from_wif(wif).map_err(|e| format!("Invalid private key: {}", e))?;
-        let pk = CompressedPublicKey(private_key.public_key(&secp).inner);
+        let public_key = secret.public_key();
         let kind = BtcScriptType::of_address(&coin.address)
             .ok_or_else(|| format!("Cannot sign for address {}", coin.address))?;
         // The script the coin is locked to, rebuilt from OUR key in the
@@ -370,83 +349,53 @@ fn sign_inputs(
         // key that does not reproduce its address (a btc.json record from a
         // different seed) is refused here, not discovered as a rejected
         // broadcast.
-        let spk = kind.address(&secp, &pk).script_pubkey();
-        let locked = Address::from_str(&coin.address)
-            .ok()
-            .and_then(|a| a.require_network(bitcoin::Network::Bitcoin).ok())
-            .map(|a| a.script_pubkey());
+        let spk = kind.address(&public_key).script_pubkey();
+        let locked = Address::parse(&coin.address).ok().map(|a| a.script_pubkey());
         if locked.as_ref() != Some(&spk) {
             return Err(format!("Signing key does not match address {}", coin.address));
         }
-        owners.insert(coin.address.clone(), Owner { secret: private_key.inner, pk, kind, spk });
+        owners.insert(coin.address.clone(), Owner { secret, pubkey: public_key.serialize(), kind, spk });
     }
 
     // Taproot commits to every input's prevout, so the full list is built
     // once even when only some inputs are taproot.
     let prevouts: Vec<TxOut> = coins
         .iter()
-        .map(|c| TxOut { value: Amount::from_sat(c.amount), script_pubkey: owners[&c.address].spk.clone() })
+        .map(|c| TxOut { value: c.amount, script_pubkey: owners[&c.address].spk.clone() })
         .collect();
 
-    let mut signed: Vec<(ScriptBuf, bitcoin::Witness)> = Vec::with_capacity(coins.len());
+    let mut signed: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(coins.len());
     for i in 0..tx.input.len() {
         let owner = &owners[&coins[i].address];
-        let mut cache = SighashCache::new(&*tx);
         match owner.kind {
             BtcScriptType::NativeSegwit | BtcScriptType::NestedSegwit => {
                 // The BIP-143 script code is the inner P2WPKH's for both.
-                let inner = Address::p2wpkh(&owner.pk, bitcoin::Network::Bitcoin).script_pubkey();
-                let sighash = cache
-                    .p2wpkh_signature_hash(i, &inner, Amount::from_sat(coins[i].amount), EcdsaSighashType::All)
+                let digest = sighash::p2wpkh(tx, i, &hash160(&owner.pubkey), coins[i].amount)
                     .map_err(|e| format!("Failed to compute sighash for input {}: {}", i, e))?;
-                let signature = secp.sign_ecdsa(&Message::from(sighash), &owner.secret);
-                let mut sig = signature.serialize_der().to_vec();
-                sig.push(EcdsaSighashType::All as u8);
-                let witness = bitcoin::Witness::from_slice(&[&sig[..], &owner.pk.to_bytes()[..]]);
+                let sig = sign::ecdsa_sighash_all(&digest, &owner.secret);
+                let witness = vec![sig, owner.pubkey.to_vec()];
                 let script_sig = match owner.kind {
-                    BtcScriptType::NestedSegwit => {
-                        let redeem = PushBytesBuf::try_from(inner.into_bytes())
-                            .map_err(|_| "redeem script too long to push".to_string())?;
-                        ScriptBuf::builder().push_slice(redeem).into_script()
-                    }
-                    _ => ScriptBuf::new(),
+                    BtcScriptType::NestedSegwit => script::p2sh_p2wpkh_script_sig(&owner.pubkey),
+                    _ => Vec::new(),
                 };
                 signed.push((script_sig, witness));
             }
             BtcScriptType::Legacy => {
-                let sighash = cache
-                    .legacy_signature_hash(i, &owner.spk, EcdsaSighashType::All.to_u32())
+                let digest = sighash::legacy(tx, i, &owner.spk)
                     .map_err(|e| format!("Failed to compute sighash for input {}: {}", i, e))?;
-                let signature = secp.sign_ecdsa(&Message::from(sighash), &owner.secret);
-                let mut sig = signature.serialize_der().to_vec();
-                sig.push(EcdsaSighashType::All as u8);
-                let sig = PushBytesBuf::try_from(sig).map_err(|_| "signature too long to push".to_string())?;
-                let key = PushBytesBuf::try_from(owner.pk.to_bytes().to_vec())
-                    .map_err(|_| "key too long to push".to_string())?;
-                let script_sig = ScriptBuf::builder().push_slice(sig).push_slice(key).into_script();
-                signed.push((script_sig, bitcoin::Witness::new()));
+                let sig = sign::ecdsa_sighash_all(&digest, &owner.secret);
+                signed.push((script::p2pkh_script_sig(&sig, &owner.pubkey), Vec::new()));
             }
             BtcScriptType::Taproot => {
-                let sighash = cache
-                    .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), TapSighashType::Default)
+                let digest = sighash::taproot_key_spend(tx, i, &prevouts)
                     .map_err(|e| format!("Failed to compute sighash for input {}: {}", i, e))?;
-                let keypair = Keypair::from_secret_key(&secp, &owner.secret);
-                let tweaked = keypair.tap_tweak(&secp, None);
                 // BIP-340 auxiliary randomness from the app's own RNG (the
                 // same draw `encrypt.rs` uses for salts) — a fresh 32 bytes
                 // per signature, so a fault or a repeated nonce can never
                 // pair two signatures against one key.
                 let aux: [u8; 32] = rand::rng().random();
-                let signature = secp.sign_schnorr_with_aux_rand(
-                    &Message::from_digest(sighash.to_byte_array()),
-                    &tweaked.to_keypair(),
-                    &aux,
-                );
-                let witness = bitcoin::Witness::p2tr_key_spend(&bitcoin::taproot::Signature {
-                    signature,
-                    sighash_type: TapSighashType::Default,
-                });
-                signed.push((ScriptBuf::new(), witness));
+                let sig = sign::schnorr_key_spend(&digest, &owner.secret, &aux);
+                signed.push((Vec::new(), vec![sig.to_vec()]));
             }
         }
     }
@@ -473,13 +422,14 @@ pub struct ReplacementPlan {
     /// with nothing but the original — plus at most one confirmed coin added
     /// when the original's change cannot fund the higher fee.
     pub inputs: Vec<Utxo>,
-    /// Outputs re-created byte for byte: everything that is not our change.
-    pub keep: Vec<(ScriptBuf, u64)>,
+    /// Outputs re-created byte for byte: everything that is not our change,
+    /// as (script, sats).
+    pub keep: Vec<(Vec<u8>, u64)>,
     /// The change output, if one survives: its amount, and its script when
     /// the original already had one (`None` = a fresh change address is
     /// needed, which only the signer may mint).
     pub change_sats: Option<u64>,
-    pub change_spk: Option<ScriptBuf>,
+    pub change_spk: Option<Vec<u8>>,
     /// What the replacement actually pays — the asked fee, or more when a
     /// sub-dust change remainder was absorbed into it.
     pub fee: u64,
@@ -533,14 +483,13 @@ pub fn plan_replacement(
     }
     let is_ours = |o: &crate::channel::BtcRbfOutput| o.address.as_deref().is_some_and(|a| ours.iter().any(|x| x == a));
     let change_idx = info.outputs.iter().rposition(is_ours);
-    let mut keep: Vec<(ScriptBuf, u64)> = Vec::new();
-    let mut change_spk: Option<ScriptBuf> = None;
+    let mut keep: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut change_spk: Option<Vec<u8>> = None;
     for (idx, o) in info.outputs.iter().enumerate() {
         let spk = match (&o.spk, &o.address) {
-            (Some(hex), _) => ScriptBuf::from_hex(hex).map_err(|e| format!("bad output script: {e}"))?,
-            (None, Some(addr)) => Address::from_str(addr)
+            (Some(hex), _) => hex::decode(hex).map_err(|e| format!("bad output script: {e}"))?,
+            (None, Some(addr)) => Address::parse(addr)
                 .ok()
-                .and_then(|a| a.require_network(bitcoin::Network::Bitcoin).ok())
                 .map(|a| a.script_pubkey())
                 .ok_or_else(|| "an output's address can't be rebuilt".to_string())?,
             (None, None) => return Err("an output has no script to rebuild".to_string()),
@@ -678,61 +627,42 @@ pub fn construct_replacement(
     plan: &ReplacementPlan,
     change_address: &str,
 ) -> Result<String, String> {
-    let inputs: Vec<TxIn> = plan
-        .inputs
-        .iter()
-        .map(|utxo| {
-            Ok(TxIn {
-                previous_output: OutPoint {
-                    txid: bitcoin::Txid::from_str(&utxo.txid)
-                        .map_err(|e| format!("Invalid txid {}: {}", utxo.txid, e))?,
-                    vout: utxo.vout,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::new(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let inputs: Vec<TxIn> = plan.inputs.iter().map(input_for).collect::<Result<Vec<_>, String>>()?;
     let mut output: Vec<TxOut> = plan
         .keep
         .iter()
-        .map(|(spk, sats)| TxOut { value: Amount::from_sat(*sats), script_pubkey: spk.clone() })
+        .map(|(spk, sats)| TxOut { value: *sats, script_pubkey: spk.clone() })
         .collect();
     if let Some(sats) = plan.change_sats {
         let spk = match &plan.change_spk {
             Some(spk) => spk.clone(),
-            None => Address::from_str(change_address)
+            None => Address::parse(change_address)
                 .map_err(|e| format!("Invalid change address: {}", e))?
-                .require_network(bitcoin::Network::Bitcoin)
-                .map_err(|e| format!("Invalid network for wallet: {}", e))?
                 .script_pubkey(),
         };
-        output.push(TxOut { value: Amount::from_sat(sats), script_pubkey: spk });
+        output.push(TxOut { value: sats, script_pubkey: spk });
     }
-    let mut tx = Transaction { version: Version::TWO, lock_time: LockTime::ZERO, input: inputs, output };
+    let mut tx = Transaction { version: 2, lock_time: 0, input: inputs, output };
     sign_inputs(&mut tx, &plan.inputs, wallet_obj)?;
-    Ok(serialize_hex(&tx))
+    Ok(tx.to_hex())
 }
 
 #[cfg(test)]
 mod sign_tests {
     use super::*;
     use crate::btc_script_type::BtcScriptType;
-    use bitcoin::key::XOnlyPublicKey;
-    use bitcoin::secp256k1::SecretKey;
-    use bitcoin::secp256k1::ecdsa::Signature as EcdsaSignature;
+    use dannesk_btc_codec::secp256k1::ecdsa::Signature as EcdsaSignature;
+    use dannesk_btc_codec::secp256k1::{Message, PublicKey, SecretKey, XOnlyPublicKey, schnorr};
 
     /// One key per family, its address in that family, and one coin on it.
     fn wallet_of(types: &[BtcScriptType]) -> (BitcoinWallet, Vec<Utxo>) {
-        let secp = Secp256k1::new();
         let mut keys = Vec::new();
         let mut coins = Vec::new();
         for (i, t) in types.iter().enumerate() {
-            let sk = SecretKey::from_slice(&[i as u8 + 1; 32]).unwrap();
-            let pk = PrivateKey { compressed: true, network: bitcoin::NetworkKind::Main, inner: sk };
-            let address = t.address(&secp, &CompressedPublicKey(pk.public_key(&secp).inner)).to_string();
-            keys.push((address.clone(), pk.to_wif()));
+            let bytes = [i as u8 + 1; 32];
+            let sk = SecretKey::from_secret_bytes(bytes).unwrap();
+            let address = t.address(&sk.public_key()).to_string();
+            keys.push((address.clone(), bytes));
             coins.push(Utxo {
                 txid: format!("{:02x}", 0x11 + i).repeat(32),
                 vout: i as u32,
@@ -745,20 +675,12 @@ mod sign_tests {
 
     fn unsigned(coins: &[Utxo]) -> Transaction {
         Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::ZERO,
-            input: coins
-                .iter()
-                .map(|c| TxIn {
-                    previous_output: OutPoint { txid: bitcoin::Txid::from_str(&c.txid).unwrap(), vout: c.vout },
-                    script_sig: ScriptBuf::new(),
-                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: bitcoin::Witness::new(),
-                })
-                .collect(),
+            version: 2,
+            lock_time: 0,
+            input: coins.iter().map(|c| input_for(c).unwrap()).collect(),
             output: vec![TxOut {
-                value: Amount::from_sat(100_000),
-                script_pubkey: ScriptBuf::from_hex("0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+                value: 100_000,
+                script_pubkey: hex::decode("0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
             }],
         }
     }
@@ -767,16 +689,9 @@ mod sign_tests {
         coins
             .iter()
             .map(|c| TxOut {
-                value: Amount::from_sat(c.amount),
-                script_pubkey: Address::from_str(&c.address).unwrap().assume_checked().script_pubkey(),
+                value: c.amount,
+                script_pubkey: Address::parse(&c.address).unwrap().script_pubkey(),
             })
-            .collect()
-    }
-
-    fn pushes(script: &ScriptBuf) -> Vec<Vec<u8>> {
-        script
-            .instructions()
-            .map(|i| i.unwrap().push_bytes().unwrap().as_bytes().to_vec())
             .collect()
     }
 
@@ -791,53 +706,43 @@ mod sign_tests {
         let (wallet, coins) = wallet_of(&types);
         let mut tx = unsigned(&coins);
         sign_inputs(&mut tx, &coins, &wallet).unwrap();
-        let secp = Secp256k1::new();
         let prevouts = prevouts(&coins);
         for (i, t) in types.iter().enumerate() {
             let input = &tx.input[i];
-            let mut cache = SighashCache::new(&tx);
             match t {
                 BtcScriptType::Taproot => {
                     assert!(input.script_sig.is_empty());
                     assert_eq!(input.witness.len(), 1);
-                    let sig = bitcoin::taproot::Signature::from_slice(&input.witness[0]).unwrap();
-                    assert_eq!(sig.sighash_type, TapSighashType::Default);
-                    let sighash = cache
-                        .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), TapSighashType::Default)
-                        .unwrap();
-                    let output_key = XOnlyPublicKey::from_slice(&prevouts[i].script_pubkey.as_bytes()[2..]).unwrap();
-                    secp.verify_schnorr(&sig.signature, &Message::from_digest(sighash.to_byte_array()), &output_key)
-                        .unwrap();
+                    assert_eq!(input.witness[0].len(), 64, "SIGHASH_DEFAULT: no hash type byte");
+                    let sig = schnorr::Signature::from_byte_array(input.witness[0][..].try_into().unwrap());
+                    let digest = sighash::taproot_key_spend(&tx, i, &prevouts).unwrap();
+                    let output_key =
+                        XOnlyPublicKey::from_byte_array(prevouts[i].script_pubkey[2..].try_into().unwrap()).unwrap();
+                    sig.verify(&digest, &output_key).unwrap();
                 }
                 BtcScriptType::Legacy => {
                     assert!(input.witness.is_empty());
-                    let items = pushes(&input.script_sig);
+                    let items = script::pushes(&input.script_sig).unwrap();
                     assert_eq!(items.len(), 2);
                     let (der, ty) = items[0].split_at(items[0].len() - 1);
-                    assert_eq!(ty, [EcdsaSighashType::All as u8]);
-                    let pk = CompressedPublicKey::from_slice(&items[1]).unwrap();
-                    assert_eq!(Address::p2pkh(pk, bitcoin::Network::Bitcoin).to_string(), coins[i].address);
-                    let sighash = cache
-                        .legacy_signature_hash(i, &prevouts[i].script_pubkey, EcdsaSighashType::All.to_u32())
-                        .unwrap();
-                    secp.verify_ecdsa(&Message::from(sighash), &EcdsaSignature::from_der(der).unwrap(), &pk.0)
-                        .unwrap();
+                    assert_eq!(ty, [sighash::SIGHASH_ALL]);
+                    let pk = PublicKey::from_slice(&items[1]).unwrap();
+                    assert_eq!(Address::p2pkh(&pk).to_string(), coins[i].address);
+                    let digest = sighash::legacy(&tx, i, &prevouts[i].script_pubkey).unwrap();
+                    EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
                 }
                 BtcScriptType::NativeSegwit | BtcScriptType::NestedSegwit => {
                     assert_eq!(input.witness.len(), 2);
                     let (der, ty) = input.witness[0].split_at(input.witness[0].len() - 1);
-                    assert_eq!(ty, [EcdsaSighashType::All as u8]);
-                    let pk = CompressedPublicKey::from_slice(&input.witness[1]).unwrap();
-                    assert_eq!(t.address(&secp, &pk).to_string(), coins[i].address);
-                    let inner = Address::p2wpkh(&pk, bitcoin::Network::Bitcoin).script_pubkey();
-                    let sighash = cache
-                        .p2wpkh_signature_hash(i, &inner, Amount::from_sat(coins[i].amount), EcdsaSighashType::All)
-                        .unwrap();
-                    secp.verify_ecdsa(&Message::from(sighash), &EcdsaSignature::from_der(der).unwrap(), &pk.0)
-                        .unwrap();
+                    assert_eq!(ty, [sighash::SIGHASH_ALL]);
+                    let pk = PublicKey::from_slice(&input.witness[1]).unwrap();
+                    assert_eq!(t.address(&pk).to_string(), coins[i].address);
+                    let digest = sighash::p2wpkh(&tx, i, &hash160(&pk.serialize()), coins[i].amount).unwrap();
+                    EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
                     match t {
                         BtcScriptType::NestedSegwit => {
-                            assert_eq!(pushes(&input.script_sig), vec![inner.into_bytes()]);
+                            let redeem = script::p2wpkh(&hash160(&pk.serialize()));
+                            assert_eq!(script::pushes(&input.script_sig).unwrap(), vec![redeem]);
                         }
                         _ => assert!(input.script_sig.is_empty()),
                     }
@@ -873,8 +778,7 @@ mod sign_tests {
     #[test]
     fn a_key_that_does_not_reproduce_its_address_is_refused() {
         let (_, coins) = wallet_of(&[BtcScriptType::Legacy]);
-        let other = PrivateKey { compressed: true, network: bitcoin::NetworkKind::Main, inner: SecretKey::from_slice(&[9u8; 32]).unwrap() };
-        let wallet = BitcoinWallet::for_test(coins[0].address.clone(), vec![(coins[0].address.clone(), other.to_wif())]);
+        let wallet = BitcoinWallet::for_test(coins[0].address.clone(), vec![(coins[0].address.clone(), [9u8; 32])]);
         let mut tx = unsigned(&coins);
         let err = sign_inputs(&mut tx, &coins, &wallet).unwrap_err();
         assert!(err.contains("does not match"), "{err}");
@@ -886,7 +790,7 @@ mod rbf_tests {
     use super::*;
     use crate::channel::{BtcRbfInfo, BtcRbfInput, BtcRbfOutput};
 
-    const OWN: &str = "bc1qyfxmsjaaaaaaaaaaaaaaaaaaaaaaaaaaamh06f67";
+    const OWN: &str = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
     const THEM_SPK: &str = "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OWN_SPK: &str = "0014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -913,7 +817,7 @@ mod rbf_tests {
         let plan = plan_replacement(&info(), &ours(), None, 1_000).unwrap();
         assert_eq!(plan.fee, 1_000);
         assert_eq!(plan.change_sats, Some(39_000));
-        assert_eq!(plan.keep, vec![(ScriptBuf::from_hex(THEM_SPK).unwrap(), 60_000)]);
+        assert_eq!(plan.keep, vec![(hex::decode(THEM_SPK).unwrap(), 60_000)]);
         assert_eq!(plan.vsize, 141);
         assert!(!plan.added_input);
     }
@@ -966,13 +870,11 @@ mod rbf_tests {
         i.outputs[0] = BtcRbfOutput {
             vout: 0,
             sats: 60_000,
-            address: Some("bc1qu5g2twq0udg5g09h2u03u54x2ve8zkzcum7szm".into()),
+            address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into()),
             spk: None,
         };
         let plan = plan_replacement(&i, &ours(), None, 1_000).unwrap();
-        let want = Address::from_str("bc1qu5g2twq0udg5g09h2u03u54x2ve8zkzcum7szm")
-            .unwrap()
-            .require_network(bitcoin::Network::Bitcoin)
+        let want = Address::parse("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
             .unwrap()
             .script_pubkey();
         assert_eq!(plan.keep, vec![(want, 60_000)]);

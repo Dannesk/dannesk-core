@@ -29,7 +29,6 @@ allow = [
     "BSD-3-Clause",
     "CC0-1.0",
     "MIT",
-    "MITNFA",  # hex_lit, via bitcoin: MIT plus a clause against false attribution
     "Unicode-3.0",
     "Zlib",
 ]
@@ -54,5 +53,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # they are on crates.io.
 allow-git = [
     "https://github.com/Dannesk/dannesk-xrpl-codec",
+    "https://github.com/Dannesk/dannesk-btc-codec",
     "https://github.com/Dannesk/dannesk-noise-protocol",
 ]
