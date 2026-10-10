@@ -12,7 +12,7 @@ publish = false
 # Our MIT crates, each in its own repository, pinned to a commit until they
 # are on crates.io.
 dannesk-xrpl-codec = { git = "https://github.com/Dannesk/dannesk-xrpl-codec", rev = "7a9243bce1905fedcac38b986e0e321c52db4c1f" }
-dannesk-btc-codec = { git = "https://github.com/Dannesk/dannesk-btc-codec", rev = "a5922c97c92834c85ffe72bbfadc49e72896e6bf" }
+dannesk-btc-codec = { git = "https://github.com/Dannesk/dannesk-btc-codec", rev = "5c4fe7bc359288cb61180cd1566ebbee7a9b32c0" }
 dannesk-noise-protocol = { git = "https://github.com/Dannesk/dannesk-noise-protocol", rev = "6d7671a7e45b3e7d07c0716c1fcf6bf03dbab220", features = ["tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
