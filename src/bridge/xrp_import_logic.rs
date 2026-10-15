@@ -1,0 +1,136 @@
+
+use crate::channel::{CHANNEL, ActivityLogState, PendingWallet, WSCommand};
+use crate::wallet::ImportMode;
+use crate::encrypt::encrypt_data;
+use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
+use dannesk_btc_codec::bip39::Mnemonic;
+use std::str::FromStr;
+use tokio::sync::mpsc::Sender;
+use zeroize::Zeroize;
+
+use crate::secure::{SecureBytes, SecureString};
+use sha2::{Digest, Sha256};
+use ripemd::Ripemd160;
+
+struct Prepared {
+    address: String,
+    encrypted_phrase: String,
+    salt: String,
+    iv: String,
+    method: String,
+}
+
+pub struct XRPImportLogic;
+
+impl XRPImportLogic {
+    pub async fn process(
+        mnemonic_phrase: SecureString,
+        bip39_pass: SecureString,
+        encryption_pass: SecureString,
+        mode: ImportMode,
+        ws_tx: Sender<WSCommand>,
+    ) -> Result<(), String> {
+        let mut log = ActivityLogState::new(
+            "Import XRP wallet",
+            &[
+                ("derive",  "Deriving keys"),
+                ("connect", "Subscribing wallet to network"),
+                ("verify",  "Awaiting response"),
+                ("save",    "Import successful"),
+            ],
+        );
+        log.start("derive");
+        let _ = CHANNEL.activity_tx.send(Some(log.clone()));
+
+        // Move the locked secrets straight into the worker thread — no clone,
+        // no unlocked copy. They zeroize + unlock when the closure returns.
+        let crypto_result = tokio::task::spawn_blocking(
+            move || -> Result<Prepared, String> {
+                let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
+                    .map_err(|e| format!("Invalid mnemonic: {}", e))?;
+
+                let mut seed_arr = mnemonic.to_seed(bip39_pass.as_str());
+                // Hold the raw seed in mlocked memory; wipe the transient stack array.
+                let seed = SecureBytes::new(seed_arr.to_vec());
+                seed_arr.zeroize();
+
+                let xpriv = Xpriv::new_master(seed.as_bytes())
+                    .map_err(|e| format!("Failed to create master key: {}", e))?;
+
+                let path = DerivationPath::from_str("m/44'/144'/0'/0/0")
+                    .map_err(|_| "Invalid derivation path".to_string())?;
+
+                let child_xpriv = xpriv
+                    .derive(&path)
+                    .map_err(|e| format!("Derivation failed: {}", e))?;
+
+                let pk_bytes = child_xpriv.public_key().serialize();
+
+                let sha_hash = Sha256::digest(pk_bytes);
+                let rip_hash = Ripemd160::digest(sha_hash);
+
+                let mut account_id = [0u8; 21];
+                account_id[0] = 0x00;
+                account_id[1..].copy_from_slice(&rip_hash);
+
+                let alphabet = bs58::Alphabet::new(b"rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz").unwrap();
+                let address = bs58::encode(&account_id)
+                    .with_alphabet(&alphabet)
+                    .with_check()
+                    .into_string();
+
+                let (encrypted_phrase, salt, iv, method) = match mode {
+                    ImportMode::Standard => {
+                        let (enc, salt, iv) = encrypt_data(encryption_pass.as_str(), mnemonic_phrase.as_str())
+                            .map_err(|e| format!("Encryption failed: {}", e))?;
+                        (enc, salt, iv, "standard".to_string())
+                    }
+                    ImportMode::Cold => {
+                        // Watch-only — nothing about the key is persisted.
+                        (String::new(), String::new(), String::new(), "cold".to_string())
+                    }
+                };
+
+                Ok(Prepared { address, encrypted_phrase, salt, iv, method })
+            },
+        )
+        .await;
+
+        match crypto_result {
+            Ok(Ok(prepared)) => {
+                log.finish("derive");
+                log.start("connect");
+                let _ = CHANNEL.activity_tx.send(Some(log.clone()));
+
+            
+                let _ = ws_tx.try_send(WSCommand {
+                    command: "import_wallet".to_string(),
+                    wallet: Some(prepared.address.clone()),
+                    pending: Some(PendingWallet {
+                        address: prepared.address,
+                        encrypted_phrase: prepared.encrypted_phrase,
+                        salt: prepared.salt,
+                        iv: prepared.iv,
+                        method: prepared.method,
+                        account_xpub: String::new(),
+                        script_type: Default::default(),
+                    }),
+                    ..Default::default()
+                });
+
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                log.fail("derive", e.clone());
+                let _ = CHANNEL.activity_tx.send(Some(log));
+                Err(e)
+            }
+            _ => {
+                let msg = "Internal thread error".to_string();
+                log.fail("derive", msg.clone());
+                let _ = CHANNEL.activity_tx.send(Some(log));
+                Err(msg)
+            }
+        }
+    }
+}
