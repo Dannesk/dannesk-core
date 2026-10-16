@@ -89,9 +89,9 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
     stash_in_flight(&wallet, &tx_hex, Some(&old_txid));
     dispatched();
 
+
     if let Err(e) =
-     
-        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, Some(&old_txid), None).await
+        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, Some(&old_txid), Some(&change_address)).await
     {
         crate::ws::commands::bitcoin_submit_transaction::discard_in_flight(None);
         fail_log(&e);

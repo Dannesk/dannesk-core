@@ -233,6 +233,24 @@ pub async fn process_response(
                     .unwrap_or(next_receive_index + seeded.is_some() as u64)
                     .max(next_receive_index);
 
+              
+                if !records.iter().any(|r| {
+                    r["chain"].as_u64() == Some(1) && r["index"].as_u64() == Some(next_change_index)
+                }) {
+                    if let Some(address) = crate::bridge::btc_receive_rotation::derive_member(
+                        &pending.account_xpub,
+                        pending.script_type,
+                        1,
+                        next_change_index as u32,
+                    ) {
+                        records.push(json!({
+                            "chain": 1,
+                            "index": next_change_index,
+                            "address": address,
+                        }));
+                    }
+                }
+
                 let wallet_metadata = json!({
                     "addresses": records,
                     "next_receive_index": next_receive_index,
