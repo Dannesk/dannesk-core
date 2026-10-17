@@ -1,5 +1,4 @@
 pub mod json_storage;
-pub mod order_record;
 pub mod xrp_create_logic;
 pub mod xrp_import_logic;
 pub mod xrp_send_logic;

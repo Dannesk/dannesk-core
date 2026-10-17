@@ -171,6 +171,7 @@ impl WalletOperations {
         let _ = CHANNEL.transactions_tx.send(TransactionState::default());
         let _ = CHANNEL.wallet_balance_tx.send((0.0, None, false, crate::channel::KeyMode::Standard));
         CHANNEL.clear_tokens();
+        let _ = CHANNEL.pending_trade_tx.send(None);
      
     }
 }

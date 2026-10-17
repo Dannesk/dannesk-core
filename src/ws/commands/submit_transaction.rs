@@ -155,7 +155,6 @@ pub async fn execute(
             quote.sequence = Some(env.sequence);
             quote.hash = Some(hash.clone());
             quote.tx_id = Some(tx_id);
-            crate::bridge::order_record::record(&hash, quote);
             let _ = CHANNEL.pending_trade_tx.send(pending);
         }
     }
@@ -215,7 +214,7 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                 && let Some(status) = result.get("status").and_then(|s| s.as_str())
             {
                 let sentence = outcome_sentence(status, result);
-                settle_pending(status, result, data.get("tx_id").and_then(|v| v.as_str()));
+                settle_pending(data.get("tx_id").and_then(|v| v.as_str()));
                 if status == "killed" || status == "failed" {
                     fail_log(&sentence);
                     return Err(sentence);
@@ -247,29 +246,11 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
 }
 
 
-fn settle_pending(status: &str, result: &Value, tx_id: Option<&str>) {
- 
-    let num = |k: &str| {
-        result
-            .get(format!("{k}_exact"))
-            .and_then(|v| v.as_f64())
-            .or_else(|| {
-                result
-                    .get(k)
-                    .and_then(|v| v.as_str())
-                    .and_then(|v| v.parse::<f64>().ok())
-            })
-    };
-
-  
+fn settle_pending(tx_id: Option<&str>) {
     let pending = CHANNEL.pending_trade_rx.borrow().clone();
     let Some(quote) = pending else { return };
     if quote.tx_id.as_deref() != tx_id || tx_id.is_none() {
         return;
-    }
-
-    if let Some(hash) = quote.hash.as_deref() {
-        crate::bridge::order_record::settle(hash, status, num("filled"), num("received"));
     }
     let _ = CHANNEL.pending_trade_tx.send(None);
 }
