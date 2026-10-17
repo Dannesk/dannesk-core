@@ -37,6 +37,10 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                 .and_then(|w| w.as_str())
                 .ok_or_else(|| "Missing wallet field".to_string())?;
 
+            if CHANNEL.wallet_balance_rx.borrow().1.as_deref() != Some(wallet) {
+                return Ok(());
+            }
+
             let balance_xrp = data
                 .get("balance")
                 .and_then(|b| b.as_str())

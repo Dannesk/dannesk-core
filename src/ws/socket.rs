@@ -210,7 +210,10 @@ pub async fn run_websocket(
         let mut first: Vec<Vec<u8>> = vec![frame(TAG_RELAY, &hello)];
         let mut deferred: Vec<WSCommand> = Vec::new();
         while let Ok(mut cmd) = commands_rx.try_recv() {
-            if cmd.command == "get_cached_balance" || cmd.command == "get_bitcoin_cached_balance" {
+            if matches!(
+                cmd.command.as_str(),
+                "get_cached_balance" | "get_bitcoin_cached_balance" | "delete_wallet" | "delete_bitcoin_wallet"
+            ) {
                 relay_state.track(&mut cmd);
             } else {
                 deferred.push(cmd);

@@ -73,6 +73,9 @@ pub async fn process_response(
             }
 
             if let Some(wallet) = data.get("wallet").and_then(|w| w.as_str()) {
+                if !crate::wallet::btc_address_records().iter().any(|r| r.address == wallet) {
+                    return Ok(());
+                }
              
                 if data.get("balance").is_none() {
                     return Err("Missing balance field".to_string());
