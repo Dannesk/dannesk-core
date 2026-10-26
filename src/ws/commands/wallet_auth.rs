@@ -18,11 +18,17 @@ struct EncryptedWalletData {
     iv: String,
 }
 
-#[derive(Clone)]
 pub struct Bip44Wallet {
     pub address: String,
     pub secret_key: SecretKey,
     pub public_key: PublicKey,
+}
+
+// The private key derived from the seed is erased when the wallet drops.
+impl Drop for Bip44Wallet {
+    fn drop(&mut self) {
+        self.secret_key.non_secure_erase();
+    }
 }
 
 pub fn authenticate_wallet(
@@ -58,7 +64,7 @@ pub fn authenticate_wallet(
     let bip39_seed = SecureBytes::new(seed_arr.to_vec());
     seed_arr.zeroize();
 
-    // `bip39_seed` is zeroized + unlocked when it drops at end of scope.
+    // `bip39 seed` is zeroized and unlocked when it drops at end of scope.
     let xpriv = Xpriv::new_master(bip39_seed.as_bytes())
         .map_err(|e| format!("Error: Failed to create master key: {}", e))?;
 

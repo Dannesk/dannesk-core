@@ -234,6 +234,11 @@ fn sign_inputs(
         kind: BtcScriptType,
         spk: Vec<u8>,
     }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.secret.non_secure_erase();
+        }
+    }
     let mut owners: std::collections::HashMap<String, Owner> = std::collections::HashMap::new();
     for coin in coins {
         if owners.contains_key(&coin.address) {
@@ -284,10 +289,6 @@ fn sign_inputs(
             BtcScriptType::Taproot => {
                 let digest = sighash::taproot_key_spend(tx, i, &prevouts)
                     .map_err(|e| format!("Failed to compute sighash for input {}: {}", i, e))?;
-                // BIP-340 auxiliary randomness from the app's own RNG (the
-                // same draw `encrypt.rs` uses for salts) — a fresh 32 bytes
-                // per signature, so a fault or a repeated nonce can never
-                // pair two signatures against one key.
                 let aux: [u8; 32] = rand::rng().random();
                 let sig = sign::schnorr_key_spend(&digest, &owner.secret, &aux);
                 signed.push((Vec::new(), vec![sig.to_vec()]));
