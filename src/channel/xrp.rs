@@ -123,7 +123,7 @@ impl TransactionState {
 pub struct TransactionData {
     pub tx_id: String,
     pub status: TransactionStatus,
-    /// The node's own result code, `tesSUCCESS` or the `tec` code a failed row settled with.
+    /// The node's own result code, `tesSUCCESS` or the `tec` code.
     pub result: Option<String>,
     pub execution_price: String,
     pub order_type: String,

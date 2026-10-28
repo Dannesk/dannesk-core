@@ -1,10 +1,10 @@
 use crate::channel::{CHANNEL, HistoryList, PageStatus, WSCommand};
 use std::time::Duration;
 
-/// How long a page request may wait for its reply before the list reads failed.
+/// page request will wait for maximum of 10s before showing failure.
 pub const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Asks the relay for the next page of `list`, and fails that request if its reply has not landed within [`PAGE_TIMEOUT`].
+/// Asks the relay for the next page of and fails if timeout.
 pub async fn load_more(list: HistoryList) {
     let Some(seq) = request(list) else { return };
     tokio::time::sleep(PAGE_TIMEOUT).await;
@@ -16,7 +16,7 @@ pub async fn load_more(list: HistoryList) {
     }
 }
 
-/// Marks the page fetching and sends the request for the rows after those held; `None` with no socket, no wallet, or a request already in flight.
+/// Marks the page fetching and sends the request for the rows.
 fn request(list: HistoryList) -> Option<u32> {
     let ws_tx = crate::ws::CRYPTO_COMMANDS_TX.get()?;
     let (wallet, command, offset, seq) = match list {
