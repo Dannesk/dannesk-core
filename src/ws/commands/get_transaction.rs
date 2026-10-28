@@ -80,6 +80,7 @@ pub(crate) fn parse_tx(tx: &Value) -> Option<TransactionData> {
     Some(TransactionData {
         tx_id,
         status,
+        result: s("result"),
         execution_price: tx.get("price").and_then(|p| p.as_str()).unwrap_or("0").to_string(),
         order_type: tx.get("tx_type").and_then(|t| t.as_str()).unwrap_or_default().to_string().to_lowercase(),
         timestamp: tx.get("timestamp").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
@@ -102,4 +103,28 @@ pub(crate) fn parse_tx(tx: &Value) -> Option<TransactionData> {
         coverage: tx.get("coverage").and_then(|v| v.as_f64()),
         fill_price: s("fill_price"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tx;
+    use crate::channel::TransactionStatus;
+    use serde_json::json;
+
+    #[test]
+    fn a_row_carries_the_nodes_result_code_when_the_relay_sends_one() {
+        let failed = parse_tx(&json!({
+            "hash": "A1", "status": "failed", "result": "tecPATH_DRY", "tx_type": "Payment",
+            "timestamp": "2026-10-28T05:17:41Z", "amount": "2.500000", "currency": "EUROP",
+            "fee": "12", "sender": "rMe", "receiver": "rThem", "destination_tag": 1042
+        }))
+        .unwrap();
+        assert_eq!(failed.status, TransactionStatus::Failed);
+        assert_eq!(failed.result.as_deref(), Some("tecPATH_DRY"));
+        assert_eq!(failed.destination_tag, Some(1042));
+
+        let old = parse_tx(&json!({ "hash": "A2", "status": "success", "tx_type": "Payment" })).unwrap();
+        assert_eq!(old.result, None);
+        assert!(parse_tx(&json!({ "hash": "A3", "status": "lost" })).is_none());
+    }
 }

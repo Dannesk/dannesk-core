@@ -12,6 +12,7 @@ pub mod btc_receive_rotation;
 pub mod btc_wallet_operations;
 pub mod xrp_wallet_operations;
 pub mod enable_logic;
+pub mod history_logic;
 
 
 pub const XRP_PATH: &str = "m/44'/144'/0'/0/0";
