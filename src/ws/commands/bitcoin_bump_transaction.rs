@@ -1,5 +1,3 @@
-
-
 use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::commands::bitcoin_submit_transaction::{
     advance_log, dispatched, fail_log, stash_in_flight,
@@ -25,7 +23,7 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
         fail_log("No transaction to replace");
         return Err("Error: no transaction to replace".to_string());
     };
-  
+
     let Some(info) = bitcoin_payment::rbf_info_for(&old_txid) else {
         fail_log("Fee-bump details not in view");
         return Err("no details for this transaction".to_string());
@@ -52,12 +50,8 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
 
     advance_log("auth", "build");
 
-    let ours: Vec<String> = crate::wallet::btc_address_records()
-        .into_iter()
-        .map(|r| r.address)
-        .collect();
     let spare = bitcoin_payment::spare_coin(&wallet, &info);
-    let plan = match bitcoin_payment::plan_replacement(&info, &ours, spare.as_ref(), fee) {
+    let plan = match bitcoin_payment::plan_replacement(&info, &wallet, spare.as_ref(), fee) {
         Ok(p) => p,
         Err(e) => {
             fail_log("Failed to build replacement");
@@ -65,13 +59,7 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
         }
     };
 
-    let change_address = if plan.change_sats.is_some() && plan.change_spk.is_none() {
-        crate::bridge::btc_receive_rotation::ensure_change_address()
-            .unwrap_or_else(|| wallet_obj.address.clone())
-    } else {
-        String::new()
-    };
-    let tx_hex = match bitcoin_payment::construct_replacement(&wallet_obj, &plan, &change_address) {
+    let tx_hex = match bitcoin_payment::construct_replacement(&wallet_obj, &plan) {
         Ok(h) => h,
         Err(e) => {
             fail_log("Failed to build replacement");
@@ -89,9 +77,8 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
     stash_in_flight(&wallet, &tx_hex, Some(&old_txid));
     dispatched();
 
-
     if let Err(e) =
-        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, Some(&old_txid), Some(&change_address)).await
+        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, Some(&old_txid)).await
     {
         crate::ws::commands::bitcoin_submit_transaction::discard_in_flight(None);
         fail_log(&e);

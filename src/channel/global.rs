@@ -154,7 +154,6 @@ pub struct PendingWallet {
     pub iv: String,
     pub method: String,
  
-    pub account_xpub: String,
    
     #[zeroize(skip)]
     pub script_type: BtcScriptType,
@@ -191,7 +190,6 @@ pub struct WSCommand {
 
     pub destination_tag: Option<u32>,
 
-    pub scan: Option<Vec<String>>,
    
     pub replaces: Option<String>,
 
@@ -200,6 +198,4 @@ pub struct WSCommand {
 
     pub pending: Option<PendingWallet>,
   
-    pub xpub: Option<String>,
-    pub script_type: Option<&'static str>,
 }

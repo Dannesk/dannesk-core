@@ -112,7 +112,6 @@ impl XRPImportLogic {
                         salt: prepared.salt,
                         iv: prepared.iv,
                         method: prepared.method,
-                        account_xpub: String::new(),
                         script_type: Default::default(),
                     }),
                     ..Default::default()

@@ -104,7 +104,6 @@ impl XRPCreateLogic {
                         salt,
                         iv,
                         method,
-                        account_xpub: String::new(),
                         script_type: Default::default(),
                     }),
                     ..Default::default()

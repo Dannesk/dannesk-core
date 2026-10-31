@@ -1,5 +1,3 @@
-
-
 use crate::channel::{BtcUtxo, CHANNEL};
 use serde_json::Value;
 use tungstenite::Message;
@@ -37,37 +35,12 @@ pub fn parse_coins(frame: &Value, owner: &str) -> Vec<BtcUtxo> {
 }
 
 
-pub fn merge_btc_utxos(owner: &str, set: Vec<BtcUtxo>) {
-    let records = crate::wallet::btc_address_records();
-    if !records.iter().any(|r| r.address == owner) {
+pub fn set_btc_utxos(wallet: &str, set: Vec<BtcUtxo>) {
+    if crate::wallet::btc_address().as_deref() != Some(wallet) {
         return;
     }
-    let primary = records[0].address.clone();
     CHANNEL.btc_utxos_tx.send_modify(|(set_wallet, union)| {
-     
-        if set_wallet.as_deref() != Some(primary.as_str()) {
-            union.clear();
-            *set_wallet = Some(primary.clone());
-        }
-        union.retain(|u| u.address != owner);
-        union.extend(set);
-    });
-    recompute_btc_balance();
-    CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.btc, true));
-}
-
-
-pub fn replace_btc_utxos(primary: &str, set: Vec<BtcUtxo>) {
-    let records = crate::wallet::btc_address_records();
-    if records.first().map(|r| r.address.as_str()) != Some(primary) {
-        return;
-    }
-    let set: Vec<BtcUtxo> = set
-        .into_iter()
-        .filter(|u| records.iter().any(|r| r.address == u.address))
-        .collect();
-    CHANNEL.btc_utxos_tx.send_modify(|(set_wallet, union)| {
-        *set_wallet = Some(primary.to_string());
+        *set_wallet = Some(wallet.to_string());
         *union = set;
     });
     recompute_btc_balance();
@@ -105,7 +78,7 @@ pub async fn process_response(
         .get("wallet")
         .and_then(|w| w.as_str())
         .ok_or("Missing wallet field")?;
-    merge_btc_utxos(wallet, parse_coins(&data, wallet));
+    set_btc_utxos(wallet, parse_coins(&data, wallet));
     Ok(())
 }
 

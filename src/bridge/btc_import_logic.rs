@@ -18,7 +18,6 @@ struct Prepared {
     salt: String,
     iv: String,
     method: String,
-    account_xpub: String,
     script_type: BtcScriptType,
 }
 
@@ -36,24 +35,21 @@ impl BTCImportLogic {
         let mut log = ActivityLogState::new(
             "Import Bitcoin wallet",
             &[
-                ("derive",  "Deriving keys"),
+                ("derive", "Deriving keys"),
                 ("connect", "Subscribing wallet to network"),
-                ("verify",  "Awaiting response"),
-                ("save",    "Import successful"),
-
+                ("verify", "Awaiting response"),
+                ("save", "Import successful"),
             ],
         );
         log.start("derive");
         let _ = CHANNEL.activity_tx.send(Some(log.clone()));
 
-     
         let crypto_result = tokio::task::spawn_blocking(
             move || -> Result<Prepared, String> {
                 let mnemonic = Mnemonic::parse(mnemonic_phrase.as_str())
                     .map_err(|e| format!("Invalid mnemonic: {}", e))?;
 
                 let mut seed_arr = mnemonic.to_seed(bip39_pass.as_str());
-                // Hold the raw seed in mlocked memory; wipe the transient stack array.
                 let seed = SecureBytes::new(seed_arr.to_vec());
                 seed_arr.zeroize();
 
@@ -72,20 +68,15 @@ impl BTCImportLogic {
                 let address = match script_type {
                     BtcScriptType::NativeSegwit => address,
                     other => {
+                        let path = DerivationPath::from_str(other.path())
+                            .map_err(|_| "Invalid derivation path".to_string())?;
                         let child = xpriv
-                            .derive(&other.member_path(0, 0))
+                            .derive(&path)
                             .map_err(|e| format!("Derivation failed: {}", e))?;
                         other.address(&child.public_key())
                     }
                 };
 
-    
-                let account_xpub = xpriv
-                    .derive(&script_type.account_path())
-                    .map_err(|e| format!("Account derivation failed: {}", e))?
-                    .to_xpub()
-                    .to_string();
-             
                 let (encrypted_phrase, salt, iv, method) = match mode {
                     ImportMode::Standard => {
                         let (enc, salt, iv) = encrypt_data(encryption_pass.as_str(), mnemonic_phrase.as_str())
@@ -97,7 +88,7 @@ impl BTCImportLogic {
                     }
                 };
 
-                Ok(Prepared { address: address.to_string(), encrypted_phrase, salt, iv, method, account_xpub, script_type })
+                Ok(Prepared { address: address.to_string(), encrypted_phrase, salt, iv, method, script_type })
             },
         )
         .await;
@@ -108,19 +99,15 @@ impl BTCImportLogic {
                 log.start("connect");
                 let _ = CHANNEL.activity_tx.send(Some(log.clone()));
 
-             
                 let _ = ws_tx.try_send(WSCommand {
                     command: "import_bitcoin_wallet".to_string(),
                     wallet: Some(prepared.address.clone()),
-                    xpub: Some(prepared.account_xpub.clone()),
-                    script_type: Some(prepared.script_type.tag()),
                     pending: Some(PendingWallet {
                         address: prepared.address,
                         encrypted_phrase: prepared.encrypted_phrase,
                         salt: prepared.salt,
                         iv: prepared.iv,
                         method: prepared.method,
-                        account_xpub: prepared.account_xpub,
                         script_type: prepared.script_type,
                     }),
                     ..Default::default()

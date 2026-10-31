@@ -183,7 +183,6 @@ pub async fn run_websocket(
             }
         }
       
-        relay_state.forget_live_list();
         let relay_asks = relay_state.resync_relay_payloads();
         let btc_asks = relay_state.resync_btc_payloads();
         for payload in relay_asks.iter().chain(btc_asks.iter()) {
@@ -232,9 +231,7 @@ pub async fn run_websocket(
         let mut closed_with: Option<u64> = None;
         for mut cmd in deferred {
             relay_state.track(&mut cmd);
-            if relay_state.is_news(&cmd) {
-                relay_state.spawn_command(cmd);
-            }
+            relay_state.spawn_command(cmd);
         }
     
         let mut rates_asked = wallet_known;
@@ -288,9 +285,7 @@ pub async fn run_websocket(
                 }
                 Some(mut cmd) = commands_rx.recv() => {
                     relay_state.track(&mut cmd);
-                    if relay_state.is_news(&cmd) {
-                        relay_state.spawn_command(cmd);
-                    }
+                    relay_state.spawn_command(cmd);
                 }
                 Some(msg) = outgoing_rx.recv() => {
                 
@@ -368,7 +363,6 @@ pub async fn run_websocket(
                                     let mut ok = true;
                                     if !btc_asked {
                                    
-                                        relay_state.forget_live_list();
                                         for payload in relay_state.resync_btc_payloads() {
                                             if let Some((tag, wrapped)) = relay::wrap(&payload) {
                                                 ok &= writer.send_frame(&frame(tag, &wrapped)).await.is_ok();

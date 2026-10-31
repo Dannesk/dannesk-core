@@ -9,7 +9,6 @@ pub async fn send_transaction(
     tx_type: &str,
     tx_hex: String,
     replaces: Option<&str>,
-    change: Option<&str>,
 ) -> Result<(), String> {
     let tx_id = Uuid::new_v4().to_string();
     let mut msg_json = json!({
@@ -21,9 +20,6 @@ pub async fn send_transaction(
     });
     if let Some(old) = replaces {
         msg_json["replaces"] = json!(old);
-    }
-    if let Some(address) = change {
-        msg_json["change_address"] = json!(address);
     }
 
     if let Some(tx) = CRYPTO_OUTGOING_TX.get() {

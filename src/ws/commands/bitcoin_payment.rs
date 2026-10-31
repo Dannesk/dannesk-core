@@ -54,17 +54,13 @@ pub fn eligible_utxos(wallet: &str) -> Result<Vec<Utxo>, String> {
         return Err("Wallet data not loaded yet — try again shortly".to_string());
     }
   
-    let ours: Vec<String> = crate::wallet::btc_address_records()
-        .into_iter()
-        .map(|r| r.address)
-        .collect();
     let own_send = |txid: &str| -> bool {
         CHANNEL
             .btc_transactions_rx
             .borrow()
             .transactions
             .get(txid)
-            .is_some_and(|tx| tx.sender_addresses.iter().any(|a| ours.contains(a)))
+            .is_some_and(|tx| tx.sender_addresses.iter().any(|a| a == wallet))
     };
     let mut coins: Vec<(u64, String, u32, u64, String)> = set
         .iter()
@@ -145,8 +141,6 @@ pub async fn construct_transaction(
     _tx_type: &str,
     utxos: Vec<Utxo>,
     fee: String,
-  
-    change_address: &str,
 ) -> Result<String, String> {
     let recipient = cmd
         .recipient
@@ -203,8 +197,8 @@ pub async fn construct_transaction(
 
     // Add change output if necessary
     let change = total_input - amount - fee;
-    if change > 0 {
-        let change_addr = Address::parse(change_address)
+    if change >= DUST_SATS {
+        let change_addr = Address::parse(&wallet_obj.address)
             .map_err(|e| format!("Invalid change address: {}", e))?;
         tx.output.push(TxOut {
             value: change,
@@ -228,6 +222,9 @@ fn sign_inputs(
     if tx.input.len() != coins.len() {
         return Err("input/coin count mismatch".to_string());
     }
+    if let Some(coin) = coins.iter().find(|c| c.address != wallet_obj.address) {
+        return Err(format!("No signing key for address {}", coin.address));
+    }
     struct Owner {
         secret: dannesk_btc_codec::secp256k1::SecretKey,
         pubkey: [u8; 33],
@@ -239,37 +236,27 @@ fn sign_inputs(
             self.secret.non_secure_erase();
         }
     }
-    let mut owners: std::collections::HashMap<String, Owner> = std::collections::HashMap::new();
-    for coin in coins {
-        if owners.contains_key(&coin.address) {
-            continue;
-        }
-        let secret = wallet_obj
-            .key_for(&coin.address)
-            .ok_or_else(|| format!("No signing key for address {}", coin.address))?;
-        let public_key = secret.public_key();
-        let kind = BtcScriptType::of_address(&coin.address)
-            .ok_or_else(|| format!("Cannot sign for address {}", coin.address))?;
-     
-        let spk = kind.address(&public_key).script_pubkey();
-        let locked = Address::parse(&coin.address).ok().map(|a| a.script_pubkey());
-        if locked.as_ref() != Some(&spk) {
-            return Err(format!("Signing key does not match address {}", coin.address));
-        }
-        owners.insert(coin.address.clone(), Owner { secret, pubkey: public_key.serialize(), kind, spk });
+    let secret = wallet_obj
+        .secret_key()
+        .ok_or_else(|| "No signing key for this wallet".to_string())?;
+    let public_key = secret.public_key();
+    let kind = BtcScriptType::of_address(&wallet_obj.address)
+        .ok_or_else(|| format!("Cannot sign for address {}", wallet_obj.address))?;
+    let owner = Owner { secret, pubkey: public_key.serialize(), kind, spk: kind.address(&public_key).script_pubkey() };
+    let locked = Address::parse(&wallet_obj.address).ok().map(|a| a.script_pubkey());
+    if locked.as_ref() != Some(&owner.spk) {
+        return Err(format!("Signing key does not match address {}", wallet_obj.address));
     }
 
     let prevouts: Vec<TxOut> = coins
         .iter()
-        .map(|c| TxOut { value: c.amount, script_pubkey: owners[&c.address].spk.clone() })
+        .map(|c| TxOut { value: c.amount, script_pubkey: owner.spk.clone() })
         .collect();
 
     let mut signed: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(coins.len());
     for i in 0..tx.input.len() {
-        let owner = &owners[&coins[i].address];
         match owner.kind {
             BtcScriptType::NativeSegwit | BtcScriptType::NestedSegwit => {
-                // The BIP-143 script code is the inner P2WPKH's for both.
                 let digest = sighash::p2wpkh(tx, i, &hash160(&owner.pubkey), coins[i].amount)
                     .map_err(|e| format!("Failed to compute sighash for input {}: {}", i, e))?;
                 let sig = sign::ecdsa_sighash_all(&digest, &owner.secret);
@@ -339,7 +326,7 @@ pub fn min_replacement_fee(info: &crate::channel::BtcRbfInfo, vsize: u64) -> u64
 
 pub fn plan_replacement(
     info: &crate::channel::BtcRbfInfo,
-    ours: &[String],
+    own: &str,
     spare: Option<&Utxo>,
     fee: u64,
 ) -> Result<ReplacementPlan, String> {
@@ -348,12 +335,12 @@ pub fn plan_replacement(
     }
     let mut inputs: Vec<Utxo> = Vec::with_capacity(info.inputs.len() + 1);
     for i in &info.inputs {
-        let Some(address) = i.address.as_deref().filter(|a| ours.iter().any(|o| o == a)) else {
+        let Some(address) = i.address.as_deref().filter(|a| *a == own) else {
             return Err("not every input is this wallet's to re-sign".to_string());
         };
         inputs.push(Utxo { txid: i.txid.clone(), vout: i.vout, amount: i.sats, address: address.to_string() });
     }
-    let is_ours = |o: &crate::channel::BtcRbfOutput| o.address.as_deref().is_some_and(|a| ours.iter().any(|x| x == a));
+    let is_ours = |o: &crate::channel::BtcRbfOutput| o.address.as_deref().is_some_and(|a| a == own);
     let change_idx = info.outputs.iter().rposition(is_ours);
     let mut keep: Vec<(Vec<u8>, u64)> = Vec::new();
     let mut change_spk: Option<Vec<u8>> = None;
@@ -445,19 +432,19 @@ pub fn rbf_info_for(txid: &str) -> Option<crate::channel::BtcRbfInfo> {
 
 pub fn quote_replacement(
     info: &crate::channel::BtcRbfInfo,
-    ours: &[String],
+    own: &str,
     spare: Option<&Utxo>,
     rate: f32,
 ) -> Result<ReplacementPlan, String> {
     let mut fee = tier_sats_at(rate, info.vsize);
-    let mut plan = plan_replacement(info, ours, spare, fee)?;
+    let mut plan = plan_replacement(info, own, spare, fee)?;
     for _ in 0..3 {
         let next = tier_sats_at(rate, plan.vsize);
         if next == fee || next <= plan.fee && plan.change_sats.is_none() {
             break;
         }
         fee = next;
-        plan = plan_replacement(info, ours, spare, fee)?;
+        plan = plan_replacement(info, own, spare, fee)?;
     }
     Ok(plan)
 }
@@ -470,7 +457,7 @@ pub fn spare_coin(wallet: &str, info: &crate::channel::BtcRbfInfo) -> Option<Utx
     }
     let mut coins: Vec<&crate::channel::BtcUtxo> = set
         .iter()
-        .filter(|u| u.height > 0 && u.txid != info.txid)
+        .filter(|u| u.height > 0 && u.spent_by.is_none() && u.txid != info.txid)
         .filter(|u| !info.inputs.iter().any(|i| i.txid == u.txid && i.vout == u.vout))
         .collect();
     coins.sort_by(|a, b| (a.height, &a.txid, a.vout).cmp(&(b.height, &b.txid, b.vout)));
@@ -483,7 +470,6 @@ pub fn spare_coin(wallet: &str, info: &crate::channel::BtcRbfInfo) -> Option<Utx
 pub fn construct_replacement(
     wallet_obj: &BitcoinWallet,
     plan: &ReplacementPlan,
-    change_address: &str,
 ) -> Result<String, String> {
     let inputs: Vec<TxIn> = plan.inputs.iter().map(input_for).collect::<Result<Vec<_>, String>>()?;
     let mut output: Vec<TxOut> = plan
@@ -494,7 +480,7 @@ pub fn construct_replacement(
     if let Some(sats) = plan.change_sats {
         let spk = match &plan.change_spk {
             Some(spk) => spk.clone(),
-            None => Address::parse(change_address)
+            None => Address::parse(&wallet_obj.address)
                 .map_err(|e| format!("Invalid change address: {}", e))?
                 .script_pubkey(),
         };
@@ -512,22 +498,19 @@ mod sign_tests {
     use dannesk_btc_codec::secp256k1::ecdsa::Signature as EcdsaSignature;
     use dannesk_btc_codec::secp256k1::{Message, PublicKey, SecretKey, XOnlyPublicKey, schnorr};
 
-    fn wallet_of(types: &[BtcScriptType]) -> (BitcoinWallet, Vec<Utxo>) {
-        let mut keys = Vec::new();
-        let mut coins = Vec::new();
-        for (i, t) in types.iter().enumerate() {
-            let bytes = [i as u8 + 1; 32];
-            let sk = SecretKey::from_secret_bytes(bytes).unwrap();
-            let address = t.address(&sk.public_key()).to_string();
-            keys.push((address.clone(), bytes));
-            coins.push(Utxo {
+    fn wallet_of(kind: BtcScriptType, coins: usize) -> (BitcoinWallet, Vec<Utxo>) {
+        let bytes = [7u8; 32];
+        let sk = SecretKey::from_secret_bytes(bytes).unwrap();
+        let address = kind.address(&sk.public_key()).to_string();
+        let coins = (0..coins)
+            .map(|i| Utxo {
                 txid: format!("{:02x}", 0x11 + i).repeat(32),
                 vout: i as u32,
                 amount: 50_000 + i as u64,
-                address,
-            });
-        }
-        (BitcoinWallet::for_test(coins[0].address.clone(), keys), coins)
+                address: address.clone(),
+            })
+            .collect();
+        (BitcoinWallet::for_test(address, bytes), coins)
     }
 
     fn unsigned(coins: &[Utxo]) -> Transaction {
@@ -552,62 +535,61 @@ mod sign_tests {
             .collect()
     }
 
-   
     #[test]
     fn every_family_signs_and_verifies() {
-        let types = BtcScriptType::IMPORT;
-        let (wallet, coins) = wallet_of(&types);
-        let mut tx = unsigned(&coins);
-        sign_inputs(&mut tx, &coins, &wallet).unwrap();
-        let prevouts = prevouts(&coins);
-        for (i, t) in types.iter().enumerate() {
-            let input = &tx.input[i];
-            match t {
-                BtcScriptType::Taproot => {
-                    assert!(input.script_sig.is_empty());
-                    assert_eq!(input.witness.len(), 1);
-                    assert_eq!(input.witness[0].len(), 64, "SIGHASH_DEFAULT: no hash type byte");
-                    let sig = schnorr::Signature::from_byte_array(input.witness[0][..].try_into().unwrap());
-                    let digest = sighash::taproot_key_spend(&tx, i, &prevouts).unwrap();
-                    let output_key =
-                        XOnlyPublicKey::from_byte_array(prevouts[i].script_pubkey[2..].try_into().unwrap()).unwrap();
-                    sig.verify(&digest, &output_key).unwrap();
-                }
-                BtcScriptType::Legacy => {
-                    assert!(input.witness.is_empty());
-                    let items = script::pushes(&input.script_sig).unwrap();
-                    assert_eq!(items.len(), 2);
-                    let (der, ty) = items[0].split_at(items[0].len() - 1);
-                    assert_eq!(ty, [sighash::SIGHASH_ALL]);
-                    let pk = PublicKey::from_slice(&items[1]).unwrap();
-                    assert_eq!(Address::p2pkh(&pk).to_string(), coins[i].address);
-                    let digest = sighash::legacy(&tx, i, &prevouts[i].script_pubkey).unwrap();
-                    EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
-                }
-                BtcScriptType::NativeSegwit | BtcScriptType::NestedSegwit => {
-                    assert_eq!(input.witness.len(), 2);
-                    let (der, ty) = input.witness[0].split_at(input.witness[0].len() - 1);
-                    assert_eq!(ty, [sighash::SIGHASH_ALL]);
-                    let pk = PublicKey::from_slice(&input.witness[1]).unwrap();
-                    assert_eq!(t.address(&pk).to_string(), coins[i].address);
-                    let digest = sighash::p2wpkh(&tx, i, &hash160(&pk.serialize()), coins[i].amount).unwrap();
-                    EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
-                    match t {
-                        BtcScriptType::NestedSegwit => {
-                            let redeem = script::p2wpkh(&hash160(&pk.serialize()));
-                            assert_eq!(script::pushes(&input.script_sig).unwrap(), vec![redeem]);
+        for kind in BtcScriptType::IMPORT {
+            let (wallet, coins) = wallet_of(kind, 2);
+            let mut tx = unsigned(&coins);
+            sign_inputs(&mut tx, &coins, &wallet).unwrap();
+            let prevouts = prevouts(&coins);
+            for i in 0..coins.len() {
+                let input = &tx.input[i];
+                match kind {
+                    BtcScriptType::Taproot => {
+                        assert!(input.script_sig.is_empty());
+                        assert_eq!(input.witness.len(), 1);
+                        assert_eq!(input.witness[0].len(), 64, "SIGHASH_DEFAULT: no hash type byte");
+                        let sig = schnorr::Signature::from_byte_array(input.witness[0][..].try_into().unwrap());
+                        let digest = sighash::taproot_key_spend(&tx, i, &prevouts).unwrap();
+                        let output_key =
+                            XOnlyPublicKey::from_byte_array(prevouts[i].script_pubkey[2..].try_into().unwrap()).unwrap();
+                        sig.verify(&digest, &output_key).unwrap();
+                    }
+                    BtcScriptType::Legacy => {
+                        assert!(input.witness.is_empty());
+                        let items = script::pushes(&input.script_sig).unwrap();
+                        assert_eq!(items.len(), 2);
+                        let (der, ty) = items[0].split_at(items[0].len() - 1);
+                        assert_eq!(ty, [sighash::SIGHASH_ALL]);
+                        let pk = PublicKey::from_slice(&items[1]).unwrap();
+                        assert_eq!(Address::p2pkh(&pk).to_string(), coins[i].address);
+                        let digest = sighash::legacy(&tx, i, &prevouts[i].script_pubkey).unwrap();
+                        EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
+                    }
+                    BtcScriptType::NativeSegwit | BtcScriptType::NestedSegwit => {
+                        assert_eq!(input.witness.len(), 2);
+                        let (der, ty) = input.witness[0].split_at(input.witness[0].len() - 1);
+                        assert_eq!(ty, [sighash::SIGHASH_ALL]);
+                        let pk = PublicKey::from_slice(&input.witness[1]).unwrap();
+                        assert_eq!(kind.address(&pk).to_string(), coins[i].address);
+                        let digest = sighash::p2wpkh(&tx, i, &hash160(&pk.serialize()), coins[i].amount).unwrap();
+                        EcdsaSignature::from_der(der).unwrap().verify(Message::from_digest(digest), &pk).unwrap();
+                        match kind {
+                            BtcScriptType::NestedSegwit => {
+                                let redeem = script::p2wpkh(&hash160(&pk.serialize()));
+                                assert_eq!(script::pushes(&input.script_sig).unwrap(), vec![redeem]);
+                            }
+                            _ => assert!(input.script_sig.is_empty()),
                         }
-                        _ => assert!(input.script_sig.is_empty()),
                     }
                 }
             }
         }
     }
 
-
     #[test]
     fn native_alone_is_unchanged() {
-        let (wallet, coins) = wallet_of(&[BtcScriptType::NativeSegwit, BtcScriptType::NativeSegwit]);
+        let (wallet, coins) = wallet_of(BtcScriptType::NativeSegwit, 2);
         let mut tx = unsigned(&coins);
         sign_inputs(&mut tx, &coins, &wallet).unwrap();
         for input in &tx.input {
@@ -616,9 +598,26 @@ mod sign_tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_leftover_below_dust_goes_to_the_fee() {
+        let (wallet, coins) = wallet_of(BtcScriptType::NativeSegwit, 1);
+        let send = |amount: &str| WSCommand {
+            recipient: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_string()),
+            amount: Some(amount.to_string()),
+            ..Default::default()
+        };
+        let tiny = construct_transaction(&wallet, &send("0.00048700"), "BTC", coins.clone(), "1100".to_string()).await.unwrap();
+        assert_eq!(Transaction::from_hex(&tiny).unwrap().output.len(), 1, "a 200 sat output is refused as dust");
+        let hex = construct_transaction(&wallet, &send("0.00040000"), "BTC", coins.clone(), "1100".to_string()).await.unwrap();
+        let tx = Transaction::from_hex(&hex).unwrap();
+        assert_eq!(tx.output.len(), 2);
+        assert_eq!(tx.output[1].value, 8_900);
+        assert_eq!(tx.output[1].script_pubkey, Address::parse(&coins[0].address).unwrap().script_pubkey());
+    }
+
     #[test]
-    fn a_coin_without_a_key_fails_the_whole_build() {
-        let (wallet, mut coins) = wallet_of(&[BtcScriptType::Taproot]);
+    fn a_coin_of_another_address_fails_the_whole_build() {
+        let (wallet, mut coins) = wallet_of(BtcScriptType::Taproot, 1);
         coins.push(Utxo { txid: "22".repeat(32), vout: 0, amount: 1, address: "bc1qyfxmsjaaaaaaaaaaaaaaaaaaaaaaaaaaamh06f67".into() });
         let mut tx = unsigned(&coins);
         assert!(sign_inputs(&mut tx, &coins, &wallet).is_err());
@@ -626,8 +625,8 @@ mod sign_tests {
 
     #[test]
     fn a_key_that_does_not_reproduce_its_address_is_refused() {
-        let (_, coins) = wallet_of(&[BtcScriptType::Legacy]);
-        let wallet = BitcoinWallet::for_test(coins[0].address.clone(), vec![(coins[0].address.clone(), [9u8; 32])]);
+        let (_, coins) = wallet_of(BtcScriptType::Legacy, 1);
+        let wallet = BitcoinWallet::for_test(coins[0].address.clone(), [9u8; 32]);
         let mut tx = unsigned(&coins);
         let err = sign_inputs(&mut tx, &coins, &wallet).unwrap_err();
         assert!(err.contains("does not match"), "{err}");
@@ -658,11 +657,10 @@ mod rbf_tests {
             descendants: 0,
         }
     }
-    fn ours() -> Vec<String> { vec![OWN.to_string()] }
 
     #[test]
     fn the_change_shrinks_and_the_recipient_is_untouched() {
-        let plan = plan_replacement(&info(), &ours(), None, 1_000).unwrap();
+        let plan = plan_replacement(&info(), OWN, None, 1_000).unwrap();
         assert_eq!(plan.fee, 1_000);
         assert_eq!(plan.change_sats, Some(39_000));
         assert_eq!(plan.keep, vec![(hex::decode(THEM_SPK).unwrap(), 60_000)]);
@@ -672,8 +670,8 @@ mod rbf_tests {
 
     #[test]
     fn bip125_floor_is_fee_plus_incremental_and_a_higher_rate() {
-        assert!(plan_replacement(&info(), &ours(), None, 281).is_err());
-        assert_eq!(plan_replacement(&info(), &ours(), None, 282).unwrap().fee, 282);
+        assert!(plan_replacement(&info(), OWN, None, 281).is_err());
+        assert_eq!(plan_replacement(&info(), OWN, None, 282).unwrap().fee, 282);
         assert_eq!(min_replacement_fee(&info(), 141), 282);
         let mut i = info(); i.min_sat_vb = 5.0;
         assert_eq!(min_replacement_fee(&i, 141), 705);
@@ -681,7 +679,7 @@ mod rbf_tests {
 
     #[test]
     fn a_sub_dust_remainder_is_absorbed_into_the_fee() {
-        let plan = plan_replacement(&info(), &ours(), None, 39_500).unwrap();
+        let plan = plan_replacement(&info(), OWN, None, 39_500).unwrap();
         assert_eq!(plan.change_sats, None);
         assert_eq!(plan.fee, 40_000);
         assert_eq!(plan.vsize, 110);
@@ -690,8 +688,8 @@ mod rbf_tests {
     #[test]
     fn a_spare_coin_funds_what_the_change_cannot() {
         let spare = Utxo { txid: "22".repeat(32), vout: 1, amount: 50_000, address: OWN.into() };
-        assert!(plan_replacement(&info(), &ours(), None, 45_000).is_err());
-        let plan = plan_replacement(&info(), &ours(), Some(&spare), 45_000).unwrap();
+        assert!(plan_replacement(&info(), OWN, None, 45_000).is_err());
+        let plan = plan_replacement(&info(), OWN, Some(&spare), 45_000).unwrap();
         assert!(plan.added_input);
         assert_eq!(plan.inputs.len(), 2);
         assert_eq!(plan.change_sats, Some(150_000 - 60_000 - 45_000));
@@ -701,9 +699,9 @@ mod rbf_tests {
     #[test]
     fn descendants_and_foreign_inputs_refuse() {
         let mut i = info(); i.descendants = 1;
-        assert!(plan_replacement(&i, &ours(), None, 1_000).is_err());
+        assert!(plan_replacement(&i, OWN, None, 1_000).is_err());
         let mut i = info(); i.inputs[0].address = Some("bc1qsomeoneelse".into());
-        assert!(plan_replacement(&i, &ours(), None, 1_000).is_err());
+        assert!(plan_replacement(&i, OWN, None, 1_000).is_err());
     }
 
     #[test]
@@ -715,7 +713,7 @@ mod rbf_tests {
             address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into()),
             spk: None,
         };
-        let plan = plan_replacement(&i, &ours(), None, 1_000).unwrap();
+        let plan = plan_replacement(&i, OWN, None, 1_000).unwrap();
         let want = Address::parse("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
             .unwrap()
             .script_pubkey();
@@ -724,9 +722,9 @@ mod rbf_tests {
 
     #[test]
     fn a_tier_is_priced_at_the_replacement_size() {
-        let plan = quote_replacement(&info(), &ours(), None, 10.0).unwrap();
+        let plan = quote_replacement(&info(), OWN, None, 10.0).unwrap();
         assert_eq!(plan.fee, 1_410);
-        assert!(quote_replacement(&info(), &ours(), None, 1.0).is_err());
+        assert!(quote_replacement(&info(), OWN, None, 1.0).is_err());
     }
 }
 
@@ -803,5 +801,21 @@ mod offer_tests {
         ));
         let offered: Vec<String> = eligible_utxos(wallet).unwrap().into_iter().map(|u| u.txid).collect();
         assert_eq!(offered, vec!["free".to_string()]);
+
+        let info = crate::channel::BtcRbfInfo {
+            txid: "bumped".to_string(),
+            vsize: 141,
+            fee_sats: 141,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            incremental_sat_vb: 1.0,
+            min_sat_vb: 1.0,
+            descendants: 0,
+        };
+        CHANNEL.btc_utxos_tx.send_replace((
+            Some(wallet.to_string()),
+            vec![coin("consumed", 5_802, 900_000, Some("33cf")), coin("free", 5_923, 965_711, None)],
+        ));
+        assert_eq!(spare_coin(wallet, &info).map(|u| u.txid).as_deref(), Some("free"));
     }
 }

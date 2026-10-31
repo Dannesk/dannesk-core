@@ -55,7 +55,6 @@ impl TradeLogic {
 
         // TakerGets = what the taker takes from us = what we sell = base_asset (e.g. XRP)
         // TakerPays = what the taker pays us = what we receive = quote_asset (e.g. RLUSD)
-        // Both arrive already rounded the way their bound points 
     
         let taker_gets = Some((pay_amount, base_asset));
         let taker_pays = Some((receive_amount, quote_asset));
@@ -77,13 +76,10 @@ impl TradeLogic {
             wallet_type: None,
             offer_sequence: None,
             destination_tag: None,
-            scan: None,
             replaces: None,
             history_kind: None,
             history_offset: None,
             pending: None,
-            xpub: None,
-            script_type: None,
         };
 
         if let Err(e) = ws_tx.try_send(cmd) {

@@ -50,11 +50,10 @@ fn apply_local_spend(txid: &str) {
         .map(|i| (i.previous_output.txid.to_string(), i.previous_output.vout))
         .collect();
  
-    let records = crate::wallet::btc_address_records();
     let owner_of = |spk: &[u8]| -> Option<String> {
         Address::from_script(spk)
             .map(|a| a.to_string())
-            .filter(|a| records.iter().any(|r| r.address == *a))
+            .filter(|a| *a == wallet)
     };
     let ours = |spk: &[u8]| owner_of(spk).is_some();
 
@@ -261,19 +260,7 @@ pub async fn execute(
         e
     })?;
 
-   
-    let change_address = crate::bridge::btc_receive_rotation::ensure_change_address()
-        .unwrap_or_else(|| wallet_obj.address.clone());
-
-    let tx_hex = match bitcoin_payment::construct_transaction(
-        &wallet_obj,
-        &cmd,
-        &tx_type,
-        utxos,
-        fee,
-        &change_address,
-    )
-    .await
+    let tx_hex = match bitcoin_payment::construct_transaction(&wallet_obj, &cmd, &tx_type, utxos, fee).await
     {
         Ok(h) => h,
         Err(e) => {
@@ -297,7 +284,7 @@ pub async fn execute(
     dispatched();
 
     if let Err(e) =
-        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, None, Some(&change_address)).await
+        bitcoin_transaction_sender::send_transaction(&wallet, &tx_type, tx_hex, None).await
     {
         discard_in_flight(None);
         fail_log(&e);

@@ -8,7 +8,6 @@ pub mod bitcoin_delete_wallet;
 pub mod bitcoin_import_wallet;
 pub mod bitcoin_payment;
 pub mod bitcoin_submit_transaction;
-pub mod bitcoin_subscribe;
 pub mod bitcoin_transaction_sender;
 pub mod bitcoin_validation;
 pub mod create_wallet;
@@ -46,7 +45,6 @@ pub enum Command {
     GetTokenBalance,
     ImportBitcoinWallet,
     
-    SubscribeBitcoinAddresses,
     GetBitcoinBalance,
     DeleteBitcoinWallet,
     SubmitBitcoinTransaction,
@@ -80,7 +78,6 @@ impl Command {
             "get_history" => Some(Command::GetHistory),
             "xrp_balance" => Some(Command::GetXRPBalance),
             "import_bitcoin_wallet" => Some(Command::ImportBitcoinWallet),
-            "subscribe_bitcoin_addresses" => Some(Command::SubscribeBitcoinAddresses),
             "get_bitcoin_cached_balance" => Some(Command::GetBitcoinBalance),
             "delete_bitcoin_wallet" => Some(Command::DeleteBitcoinWallet),
             "bitcoin_submit_transaction"
@@ -122,9 +119,6 @@ impl Command {
 
             Command::ImportBitcoinWallet => {
                 bitcoin_import_wallet::execute(bitcoin_current_wallet, cmd).await
-            }
-            Command::SubscribeBitcoinAddresses => {
-                bitcoin_subscribe::execute(bitcoin_current_wallet, cmd).await
             }
             Command::GetBitcoinBalance => {
                 getbitcoincachedbalance::execute(bitcoin_current_wallet, cmd).await
@@ -188,7 +182,6 @@ impl Command {
             Command::ImportBitcoinWallet => {
                 bitcoin_import_wallet::process_response(message, bitcoin_current_wallet, pending).await
             }
-            Command::SubscribeBitcoinAddresses => Ok(()),
             Command::GetBitcoinBalance => {
                 getbitcoincachedbalance::process_response(message, bitcoin_current_wallet).await
             }

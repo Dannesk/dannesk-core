@@ -113,7 +113,7 @@ pub async fn process_response(
                 return Ok(());
             }
 
-            if !crate::wallet::btc_address_records().iter().any(|r| r.address == wallet) {
+            if crate::wallet::btc_address().as_deref() != Some(wallet) {
                 return Ok(());
             }
 

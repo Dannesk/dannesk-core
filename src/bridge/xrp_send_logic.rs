@@ -11,8 +11,6 @@ pub struct SendParams {
     pub bip39_pass: SecureString,
     pub recipient: String,
     pub amount: String,
-    /// Manually-entered destination tag (r-address path). Ignored when the
-    /// recipient is an X-address, which carries its own tag.
     pub destination_tag: Option<u32>,
     pub wallet_address: String,
     pub asset: String,
@@ -82,13 +80,10 @@ impl XRPSendLogic {
             wallet_type: Some(asset),
             offer_sequence: None,
             destination_tag,
-            scan: None,
             replaces: None,
             history_kind: None,
             history_offset: None,
             pending: None,
-            xpub: None,
-            script_type: None,
         };
 
         ws_tx.try_send(cmd).map_err(|e| {

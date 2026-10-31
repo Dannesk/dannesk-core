@@ -1,7 +1,6 @@
 
 
 use dannesk_btc_codec::address::{Address, Kind};
-use dannesk_btc_codec::bip32::DerivationPath;
 use dannesk_btc_codec::secp256k1::PublicKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -81,18 +80,6 @@ impl BtcScriptType {
         }
     }
 
-    pub fn account_path(self) -> DerivationPath {
-        format!("m/{}'/0'/0'", self.purpose())
-            .parse()
-            .expect("account path is a literal")
-    }
-
-    pub fn member_path(self, chain: u32, index: u32) -> DerivationPath {
-        format!("m/{}'/0'/0'/{}/{}", self.purpose(), chain, index)
-            .parse()
-            .expect("member path is a literal with two indices")
-    }
-
     pub fn address(self, key: &PublicKey) -> Address {
         match self {
             Self::NativeSegwit => Address::p2wpkh(key),
@@ -154,7 +141,7 @@ pub fn stored() -> BtcScriptType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dannesk_btc_codec::bip32::Xpriv;
+    use dannesk_btc_codec::bip32::{DerivationPath, Xpriv};
     use dannesk_btc_codec::bip39::Mnemonic;
 
     const ABANDON: &str =
@@ -163,7 +150,7 @@ mod tests {
     fn first_address(t: BtcScriptType) -> String {
         let seed = Mnemonic::parse(ABANDON).unwrap().to_seed("");
         let master = Xpriv::new_master(&seed).unwrap();
-        let child = master.derive(&t.member_path(0, 0)).unwrap();
+        let child = master.derive(&t.path().parse::<DerivationPath>().unwrap()).unwrap();
         t.address(&child.public_key()).to_string()
     }
 
@@ -208,7 +195,6 @@ mod tests {
     fn paths_carry_the_purpose() {
         for t in BtcScriptType::IMPORT {
             assert_eq!(t.path(), format!("m/{}'/0'/0'/0/0", t.purpose()));
-            assert_eq!(t.member_path(0, 0).to_string(), t.path());
         }
     }
 }
