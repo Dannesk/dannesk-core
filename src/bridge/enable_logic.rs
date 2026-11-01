@@ -20,6 +20,7 @@ impl TrustlineEnableLogic {
         asset: String,
         limit: &'static str,
         title: &'static str,
+        fee: Option<u64>,
         ws_tx: Sender<WSCommand>,
     ) {
         let Ok(mut log) = ActivityLogState::begin(
@@ -27,9 +28,9 @@ impl TrustlineEnableLogic {
             &[
                 ("init",      "Initializing"),
                 ("auth",      "Authenticating"),
-                ("build",     "Constructing transaction"),
+                ("build",     "Signing transaction"),
                 ("broadcast", "Broadcasting to network"),
-                ("confirm",   "Awaiting response"),
+                ("confirm",   "Awaiting validation"),
 
             ],
             "relay:xrp",
@@ -37,7 +38,7 @@ impl TrustlineEnableLogic {
             return;
         };
 
-        // Move the locked secrets into the command — no clone, no unlocked copy.
+        // secrets moved into the command. No clone. No copy.
         let bip39_opt = if bip39_pass.is_empty() {
             None
         } else {
@@ -63,7 +64,7 @@ impl TrustlineEnableLogic {
             passphrase,
             seed,
             trustline_limit: Some(limit.to_string()),
-            fee: None,
+            fee: fee.map(|d| d.to_string()),
             tx_type: Some("trustset".to_string()),
             taker_pays: None,
             taker_gets: None,

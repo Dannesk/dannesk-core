@@ -103,7 +103,7 @@ pub async fn execute(
 
     advance_log("auth", "build");
 
-    let env = ledger_env(&wallet).map_err(|e| {
+    let env = ledger_env(&wallet, cmd.fee.as_deref()).map_err(|e| {
         fail_log(&e);
         release_pending();
         e
@@ -335,8 +335,8 @@ struct LedgerEnv {
 
 pub const LAST_LEDGER_OFFSET: u32 = 20;
 
-fn ledger_env(wallet: &str) -> Result<LedgerEnv, String> {
-   
+fn ledger_env(wallet: &str, locked_fee: Option<&str>) -> Result<LedgerEnv, String> {
+
     let wallet_loaded = CHANNEL.wallet_balance_rx.borrow().1.as_deref() == Some(wallet);
     let account = *CHANNEL.xrp_account_rx.borrow();
     let node = CHANNEL.xrp_node_rx.borrow().clone();
@@ -346,9 +346,7 @@ fn ledger_env(wallet: &str) -> Result<LedgerEnv, String> {
         .filter(|_| wallet_loaded)
         .ok_or_else(|| "Wallet data not loaded yet — try again shortly".to_string())?;
 
-    let fee = node
-        .open_ledger_fee
-        .ok_or_else(|| "Node data not loaded yet — try again shortly".to_string())?;
+    let fee = fee_to_sign(locked_fee)?;
     let ledger_index = node
         .ledger_index
         .ok_or_else(|| "Node data not loaded yet — try again shortly".to_string())?;
@@ -359,10 +357,34 @@ fn ledger_env(wallet: &str) -> Result<LedgerEnv, String> {
     Ok(LedgerEnv { sequence, fee, last_ledger_sequence })
 }
 
+// The fee the user reviewed, in drops, before sign.
+fn fee_to_sign(locked: Option<&str>) -> Result<u64, String> {
+    let drops = locked.ok_or_else(|| "Node data not loaded yet — try again shortly".to_string())?;
+    drops
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|d| *d > 0)
+        .ok_or_else(|| "Invalid fee".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_blob_signs_the_reviewed_fee() {
+        assert_eq!(fee_to_sign(Some("12")), Ok(12));
+        assert_eq!(fee_to_sign(Some(" 5000 ")), Ok(5000));
+    }
+
+    #[test]
+    fn no_reviewed_fee_means_no_signing() {
+        assert!(fee_to_sign(None).is_err());
+        assert!(fee_to_sign(Some("0")).is_err());
+        assert!(fee_to_sign(Some("ten")).is_err());
+    }
 
     fn order(filled: &str, fc: &str, received: &str, rc: &str, requested: &str, ac: &str) -> Value {
         json!({

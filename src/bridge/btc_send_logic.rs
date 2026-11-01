@@ -38,9 +38,9 @@ impl BtcSendLogic {
               
                 ("init",      "Initializing"),
                 ("auth",      "Authenticating"),
-                ("build",     "Constructing transaction"),
+                ("build",     "Signing transaction"),
                 ("broadcast", "Broadcasting to network"),
-                ("confirm",   "Awaiting response"),
+                ("confirm",   "Awaiting validation"),
             ],
             crate::channel::BTC_NODE,
         )?;

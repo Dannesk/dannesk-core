@@ -19,6 +19,7 @@ impl TradeLogic {
         receive_amount: String,
         flags: Vec<String>,
         wallet_address: String,
+        fee: Option<u64>,
         ws_tx: Sender<WSCommand>,
         _last_view: Option<()>,
     ) {
@@ -27,9 +28,9 @@ impl TradeLogic {
             &[
                 ("init",      "Initializing"),
                 ("auth",      "Authenticating"),
-                ("build",     "Constructing transaction"),
+                ("build",     "Signing transaction"),
                 ("broadcast", "Broadcasting to network"),
-                ("confirm",   "Awaiting response"),
+                ("confirm",   "Awaiting validation"),
             ],
             "relay:xrp",
         ) else {
@@ -68,7 +69,7 @@ impl TradeLogic {
             seed,
             bip39: bip39_opt,
             trustline_limit: None,
-            fee: None,
+            fee: fee.map(|d| d.to_string()),
             tx_type: Some("offer_create".to_string()),
             taker_pays,
             taker_gets,

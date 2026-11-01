@@ -12,6 +12,7 @@ impl CancelLogic {
         bip39_pass: SecureString,
         offer_sequence: u32,
         wallet_address: String,
+        fee: Option<u64>,
         ws_tx: Sender<WSCommand>,
     ) {
         let Ok(mut log) = ActivityLogState::begin(
@@ -19,9 +20,9 @@ impl CancelLogic {
             &[
                 ("init",      "Initializing"),
                 ("auth",      "Authenticating"),
-                ("build",     "Constructing transaction"),
+                ("build",     "Signing transaction"),
                 ("broadcast", "Broadcasting to network"),
-                ("confirm",   "Awaiting response"),
+                ("confirm",   "Awaiting validation"),
 
             ],
             "relay:xrp",
@@ -29,7 +30,7 @@ impl CancelLogic {
             return;
         };
 
-        // Move the locked secrets into the command — no clone, no unlocked copy.
+        // secrets moved into the command. no clone, no unlocked copy.
         let bip39_opt = if bip39_pass.is_empty() {
             None
         } else {
@@ -52,6 +53,7 @@ impl CancelLogic {
             wallet: Some(wallet_address),
             tx_type: Some("offer_cancel".to_string()),
             offer_sequence: Some(offer_sequence),
+            fee: fee.map(|d| d.to_string()),
             passphrase,
             seed,
             bip39: bip39_opt,

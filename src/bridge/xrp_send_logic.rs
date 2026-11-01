@@ -14,6 +14,7 @@ pub struct SendParams {
     pub destination_tag: Option<u32>,
     pub wallet_address: String,
     pub asset: String,
+    pub fee: Option<u64>, // fee from wscommand, no fallback as user must see and agree.
     pub ws_tx: Sender<WSCommand>,
 }
 
@@ -29,6 +30,7 @@ impl XRPSendLogic {
             destination_tag,
             wallet_address,
             asset,
+            fee,
             ws_tx,
         } = params;
 
@@ -37,20 +39,20 @@ impl XRPSendLogic {
             &[
                 ("init",      "Initializing"),
                 ("auth",      "Authenticating"),
-                ("build",     "Constructing transaction"),
+                ("build",     "Signing transaction"),
                 ("broadcast", "Broadcasting to network"),
-                ("confirm",   "Awaiting response"),
+                ("confirm",   "Awaiting validation"),
             ],
             "relay:xrp",
         )?;
 
-        // Move the locked secrets into the command — no clone, no unlocked copy.
+        // locked secrets move into command. no clone, no unlocked copy.
         let bip39_opt = if bip39_pass.is_empty() {
             None
         } else {
             Some(bip39_pass)
         };
-        // writes it into the same SecureString slot).
+        // writes into the same SecureString slot.
         let (passphrase, seed) = match mode.as_str() {
             "passphrase" => (
                 if passphrase.is_empty() { None } else { Some(passphrase) },
@@ -72,7 +74,7 @@ impl XRPSendLogic {
             seed,
             bip39: bip39_opt,
             trustline_limit: None,
-            fee: None,
+            fee: fee.map(|d| d.to_string()),
             tx_type: Some("payment".to_string()),
             taker_pays: None,
             taker_gets: None,
