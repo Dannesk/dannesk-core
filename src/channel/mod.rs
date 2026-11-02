@@ -237,6 +237,10 @@ pub struct Channel {
     pub markets_rx: watch::Receiver<HashMap<String, MarketSummary>>,
     pub pending_trade_tx: watch::Sender<Option<PendingTrade>>,
     pub pending_trade_rx: watch::Receiver<Option<PendingTrade>>,
+    pub trade_ticket_tx: watch::Sender<Option<crate::utils::trade::TradeTicket>>,
+    pub trade_ticket_rx: watch::Receiver<Option<crate::utils::trade::TradeTicket>>,
+    pub trade_quote_tx: watch::Sender<Option<crate::utils::trade::TradeQuote>>,
+    pub trade_quote_rx: watch::Receiver<Option<crate::utils::trade::TradeQuote>>,
 
     pub wallet_balance_tx: watch::Sender<(f64, Option<String>, bool, KeyMode)>,
     pub wallet_balance_rx: watch::Receiver<(f64, Option<String>, bool, KeyMode)>,
@@ -283,6 +287,8 @@ impl Channel {
         let (orderbook_tx, orderbook_rx) = watch::channel(HashMap::new());
         let (markets_tx, markets_rx) = watch::channel(HashMap::new());
         let (pending_trade_tx, pending_trade_rx) = watch::channel(None);
+        let (trade_ticket_tx, trade_ticket_rx) = watch::channel(None);
+        let (trade_quote_tx, trade_quote_rx) = watch::channel(None);
 
         let (wallet_balance_tx, wallet_balance_rx) = watch::channel((0.0, None, false, KeyMode::Standard));
 
@@ -338,6 +344,10 @@ impl Channel {
             markets_rx,
             pending_trade_tx,
             pending_trade_rx,
+            trade_ticket_tx,
+            trade_ticket_rx,
+            trade_quote_tx,
+            trade_quote_rx,
 
             wallet_balance_tx,
             wallet_balance_rx,

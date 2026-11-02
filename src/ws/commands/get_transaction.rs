@@ -100,6 +100,8 @@ pub(crate) fn parse_tx(tx: &Value) -> Option<TransactionData> {
         received_currency: s("received_currency"),
         remaining: s("remaining"),
         remaining_currency: s("remaining_currency"),
+        remaining_pay: s("remaining_pay"),
+        remaining_pay_currency: s("remaining_pay_currency"),
         coverage: tx.get("coverage").and_then(|v| v.as_f64()),
         fill_price: s("fill_price"),
     })

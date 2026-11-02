@@ -123,7 +123,6 @@ impl TransactionState {
 pub struct TransactionData {
     pub tx_id: String,
     pub status: TransactionStatus,
-    /// The node's own result code, `tesSUCCESS` or the `tec` code.
     pub result: Option<String>,
     pub execution_price: String,
     pub order_type: String,
@@ -149,6 +148,10 @@ pub struct TransactionData {
 
     pub remaining: Option<String>,
     pub remaining_currency: Option<String>,
+    #[serde(default)]
+    pub remaining_pay: Option<String>,
+    #[serde(default)]
+    pub remaining_pay_currency: Option<String>,
     pub coverage: Option<f64>,
   
     pub fill_price: Option<String>,
