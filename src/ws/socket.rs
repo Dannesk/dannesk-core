@@ -1,6 +1,6 @@
 
 
-use crate::channel::{CHANNEL, Phase, WSCommand};
+use crate::channel::{CHANNEL, Phase, Socket, WSCommand};
 use crate::ws::config::*;
 use crate::ws::rates;
 use crate::ws::relay::{self, RelayState};
@@ -68,7 +68,7 @@ const LINK_PREFIXES: [(fn(&Links) -> bool, &str); 4] =
 fn publish_with(before: Links, connected: bool, links: Links) {
     for (link, prefix) in LINK_PREFIXES {
         if link(&before) && !(connected && link(&links)) {
-            CHANNEL.mark_link_down(prefix);
+            CHANNEL.forget_link(prefix);
         }
     }
     publish(connected, links);
@@ -83,12 +83,16 @@ fn publish(connected: bool, links: Links) {
 }
 
 
-fn set(tx: &tokio::sync::watch::Sender<bool>, up: bool) {
+fn set<T: PartialEq>(tx: &tokio::sync::watch::Sender<T>, value: T) {
     tx.send_if_modified(|current| {
-        let changed = *current != up;
-        *current = up;
+        let changed = *current != value;
+        *current = value;
         changed
     });
+}
+
+fn dialing(was_live: bool, attempt: u32) -> Socket {
+    if was_live { Socket::Reconnecting { attempt } } else { Socket::Connecting { attempt } }
 }
 
 fn frame(tag: u8, payload: &str) -> Vec<u8> {
@@ -120,7 +124,9 @@ pub async fn run_websocket(
     let mut wallets_waited = false;
     let mut books_seeded = false;
     let mut last_immediate = false;
-  
+    let mut attempt: u32 = 0;
+    let mut was_live = false;
+
     tokio::spawn(async {
         tokio::time::sleep(crate::channel::FETCH_LIMIT).await;
         CHANNEL.launch_tx.send_modify(|launch| launch.over = true);
@@ -129,6 +135,8 @@ pub async fn run_websocket(
     loop {
         let mut links = Links::default();
         publish(false, links);
+        attempt = attempt.saturating_add(1);
+        set(&CHANNEL.socket_tx, dialing(was_live, attempt));
 
         crate::ws::trace("socket: connecting");
         let dialled = tokio::select! {
@@ -218,7 +226,7 @@ pub async fn run_websocket(
             }
         };
         crate::ws::trace("socket: open (handshake done)");
-        // Its own task: a read cut off by another branch of the select would lose the bytes it held.
+        // It needs its own task because a read cut off by another branch of the select would lose the bytes.
         let (inbound_tx, mut inbound) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         let reading = tokio::spawn(async move {
             while let Ok(frame) = reader.recv_frame().await {
@@ -278,6 +286,7 @@ pub async fn run_websocket(
                     let _ = writer.shutdown().await;
                     reading.abort();
                     publish(false, links);
+                    set(&CHANNEL.socket_tx, dialing(was_live, attempt));
                     return Ok(());
                 }
                 _ = &mut idle => {
@@ -336,12 +345,15 @@ pub async fn run_websocket(
                                 let before = links;
                                 links = parse_links(&text, links);
                                 publish_with(before, true, links);
-                             
+                                set(&CHANNEL.socket_tx, Socket::Live);
+                                was_live = true;
+                                attempt = 0;
+
                                 settle_launch(&mut launched, Phase::Connected);
                            
                                 let (relay_asked, btc_asked) = asked_in_first;
                                 asked_in_first = (false, false);
-                                // An owed removal is cleared only once a later report shows its link stayed up.
+                                // An owed removal is cleared only once a report shows its link stayed up.
                                 if links.relay && !before.relay {
                                     let mut ok = true;
                                     if !relay_asked {
@@ -398,6 +410,7 @@ pub async fn run_websocket(
 
         reading.abort();
         publish_with(links, false, Links::default());
+        set(&CHANNEL.socket_tx, dialing(was_live, attempt));
         relay_state.deletes_unwritten("delete_wallet");
         relay_state.deletes_unwritten("delete_bitcoin_wallet");
 

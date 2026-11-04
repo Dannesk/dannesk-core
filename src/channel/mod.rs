@@ -192,6 +192,14 @@ impl Launch {
     }
 }
 
+// The socket to the proxy; the attempt counts the dials since it was last live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Socket {
+    Connecting { attempt: u32 },
+    Reconnecting { attempt: u32 },
+    Live,
+}
+
 pub static CHANNEL: LazyLock<Channel> = LazyLock::new(Channel::new);
 
 pub struct Channel {
@@ -215,7 +223,9 @@ pub struct Channel {
   
     pub proxy_ws_status_tx: watch::Sender<bool>,
     pub proxy_ws_status_rx: watch::Receiver<bool>,
-  
+    pub socket_tx: watch::Sender<Socket>,
+    pub socket_rx: watch::Receiver<Socket>,
+
     pub loaded_tx: watch::Sender<Loaded>,
     pub loaded_rx: watch::Receiver<Loaded>,
     pub launch_tx: watch::Sender<Launch>,
@@ -278,6 +288,7 @@ impl Channel {
         let (btc_ws_status_tx, btc_ws_status_rx) = watch::channel(false);
         let (book_ws_status_tx, book_ws_status_rx) = watch::channel(false);
         let (proxy_ws_status_tx, proxy_ws_status_rx) = watch::channel(false);
+        let (socket_tx, socket_rx) = watch::channel(Socket::Connecting { attempt: 0 });
         let (loaded_tx, loaded_rx) = watch::channel(Loaded::default());
         let (launch_tx, launch_rx) = watch::channel(Launch::new());
         let (service_health_tx, service_health_rx) = watch::channel(ServiceHealth::default());
@@ -326,6 +337,8 @@ impl Channel {
             book_ws_status_tx,
             proxy_ws_status_tx,
             proxy_ws_status_rx,
+            socket_tx,
+            socket_rx,
             loaded_tx,
             loaded_rx,
             launch_tx,
@@ -544,14 +557,9 @@ impl Channel {
     }
 
     
-    pub fn mark_link_down(&self, prefix: &str) {
-        self.service_health_tx.send_modify(|h| {
-            for (key, c) in h.components.iter_mut() {
-                if key.starts_with(prefix) {
-                    c.up = false;
-                }
-            }
-        });
+    // A dropped link's reports read unknown until its service reports again.
+    pub fn forget_link(&self, prefix: &str) {
+        self.service_health_tx.send_modify(|h| h.components.retain(|key, _| !key.starts_with(prefix)));
     }
 
     
