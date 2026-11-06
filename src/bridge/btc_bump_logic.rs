@@ -13,6 +13,8 @@ pub struct BtcBumpParams {
     pub txid: String,
     /// The committed fee, absolute satoshis.
     pub fee: String,
+    /// The replacement's size the fee was priced at.
+    pub vsize: u64,
     pub wallet_address: String,
     pub ws_tx: Sender<WSCommand>,
 }
@@ -21,7 +23,7 @@ pub struct BtcBumpLogic;
 
 impl BtcBumpLogic {
     pub async fn process(params: BtcBumpParams) -> Result<(), String> {
-        let BtcBumpParams { mode, passphrase, mnemonic, bip39_pass, txid, fee, wallet_address, ws_tx } =
+        let BtcBumpParams { mode, passphrase, mnemonic, bip39_pass, txid, fee, vsize, wallet_address, ws_tx } =
             params;
 
         let mut log = ActivityLogState::begin(
@@ -50,6 +52,7 @@ impl BtcBumpLogic {
             seed,
             bip39: bip39_opt,
             fee: Some(fee),
+            vsize: Some(vsize),
             tx_type: Some("BTC".to_string()),
             wallet_type: Some("BTC".to_string()),
             replaces: Some(txid),

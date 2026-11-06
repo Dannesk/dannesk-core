@@ -80,7 +80,7 @@ pub fn eligible_utxos(wallet: &str) -> Result<Vec<Utxo>, String> {
     };
     let mut coins: Vec<(u64, String, u32, u64, String)> = set
         .iter()
-        .filter(|u| u.spent_by.is_none())
+        .filter(|u| u.spent_by.is_none() && u.sats > 0)
         .filter(|u| u.height > 0 || own_send(&u.txid))
         .map(|u| (u.height, u.txid.clone(), u.vout, u.sats, u.address.clone()))
         .collect();
@@ -389,15 +389,16 @@ pub fn plan_replacement(
     Ok(plan)
 }
 
-/// The replacement signed at exactly the fee the command carries. refuse instead of paying more.
+/// The replacement signed at exactly the fee and size the command carries. refuse instead of paying another rate.
 pub fn replacement_at(
     info: &crate::channel::BtcRbfInfo,
     own: &str,
     spares: &[Utxo],
     fee: u64,
+    vsize: u64,
 ) -> Result<ReplacementPlan, String> {
     let plan = replacement(info, own, spares, fee, None)?;
-    if plan.fee != fee {
+    if plan.fee != fee || plan.vsize != vsize {
         return Err(BUMP_CHANGED.to_string());
     }
     Ok(plan)
@@ -475,7 +476,8 @@ pub(crate) fn replacement(
 
 
 
-pub fn rbf_info_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
+/// bump replacement from the send's record. signing reads nothing from the node, so its rates stay zero.
+pub fn rbf_record_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
     let txs = CHANNEL.btc_transactions_rx.borrow();
     let Some(rec) = txs.transactions.get(txid) else {
         return Err("This send isn't in view.".to_string());
@@ -489,10 +491,6 @@ pub fn rbf_info_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
     }
     let vsize = rec.vsize.filter(|v| *v > 0).ok_or_else(details)?;
     let fee_sats: u64 = rec.fees.parse().ok().filter(|f| *f > 0).ok_or_else(details)?;
-    let node = CHANNEL.btc_node_rx.borrow().clone();
-    let rates = || "Fee rates from the node aren't in yet.".to_string();
-    let incremental_sat_vb = node.incremental_sat_vb.ok_or_else(rates)?;
-    let min_sat_vb = node.tiers.ok_or_else(rates)?[0];
     let descendants = txs
         .transactions
         .values()
@@ -505,30 +503,71 @@ pub fn rbf_info_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
         fee_sats,
         inputs: rec.inputs.clone(),
         outputs: rec.outputs.clone(),
-        incremental_sat_vb,
-        min_sat_vb,
+        incremental_sat_vb: 0.0,
+        min_sat_vb: 0.0,
         descendants,
     })
 }
 
+pub fn rbf_info_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
+    let mut info = rbf_record_for(txid)?;
+    let node = CHANNEL.btc_node_rx.borrow();
+    let rates = || "Fee rates from the node aren't in yet.".to_string();
+    info.incremental_sat_vb = node.incremental_sat_vb.ok_or_else(rates)?;
+    info.min_sat_vb = node.tiers.ok_or_else(rates)?[0];
+    Ok(info)
+}
 
-pub fn quote_replacement(
+#[derive(Debug, Clone, PartialEq)]
+pub enum BumpPrice {
+    Built(ReplacementPlan),
+    Unbuilt { fee: u64, vsize: u64, adds_coin: bool },
+}
+
+impl BumpPrice {
+    pub fn fee(&self) -> u64 {
+        match self {
+            BumpPrice::Built(plan) => plan.fee,
+            BumpPrice::Unbuilt { fee, .. } => *fee,
+        }
+    }
+
+    pub fn vsize(&self) -> u64 {
+        match self {
+            BumpPrice::Built(plan) => plan.vsize,
+            BumpPrice::Unbuilt { vsize, .. } => *vsize,
+        }
+    }
+
+    pub fn clears(&self, info: &crate::channel::BtcRbfInfo) -> bool {
+        self.fee() >= min_replacement_fee(info, self.vsize())
+    }
+}
+
+pub fn price_replacement(
     info: &crate::channel::BtcRbfInfo,
     own: &str,
     spares: &[Utxo],
     rate: f32,
-) -> Result<ReplacementPlan, String> {
-    let mut fee = tier_sats_at(rate, info.vsize);
-    let mut plan = plan_replacement(info, own, spares, fee)?;
-    for _ in 0..3 {
+) -> BumpPrice {
+    let slowest = Some(info.min_sat_vb);
+    let (mut size, mut coin) = (info.vsize, false);
+    let mut fee = tier_sats_at(rate, size);
+    for _ in 0..4 {
+        let plan = match replacement(info, own, spares, fee, slowest) {
+            Ok(plan) => plan,
+            Err(_) => return BumpPrice::Unbuilt { fee, vsize: size, adds_coin: coin },
+        };
         let next = tier_sats_at(rate, plan.vsize);
         if next == fee || next <= plan.fee && plan.change_sats.is_none() {
-            break;
+            return BumpPrice::Built(plan);
         }
-        fee = next;
-        plan = plan_replacement(info, own, spares, fee)?;
+        (size, coin, fee) = (plan.vsize, plan.added_input, next);
     }
-    Ok(plan)
+    match replacement(info, own, spares, fee, slowest) {
+        Ok(plan) => BumpPrice::Built(plan),
+        Err(_) => BumpPrice::Unbuilt { fee, vsize: size, adds_coin: coin },
+    }
 }
 
 
@@ -861,12 +900,12 @@ mod rbf_tests {
         let mut busy = info();
         busy.min_sat_vb = 10.0;
         let kept = plan_replacement(&info(), OWN, &[], 39_500).unwrap();
-        assert_eq!(replacement_at(&busy, OWN, &[], kept.fee), Ok(kept), "a fee rise after review changed the bump");
+        assert_eq!(replacement_at(&busy, OWN, &[], kept.fee, kept.vsize), Ok(kept), "a fee rise after review changed the bump");
         let absorbed = plan_replacement(&info(), OWN, &[], 39_800).unwrap();
-        assert_eq!(replacement_at(&busy, OWN, &[], absorbed.fee), Ok(absorbed));
-        assert_eq!(replacement_at(&info(), OWN, &[], 39_800), Err(BUMP_CHANGED.to_string()));
-        assert_eq!(replacement_at(&info(), OWN, &[], 39_706).map(|p| p.change_sats), Ok(Some(294)));
-        assert_eq!(replacement_at(&info(), OWN, &[], 39_707), Err(BUMP_CHANGED.to_string()));
+        assert_eq!(replacement_at(&busy, OWN, &[], absorbed.fee, absorbed.vsize), Ok(absorbed));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_800, 110), Err(BUMP_CHANGED.to_string()));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_706, 141).map(|p| p.change_sats), Ok(Some(294)));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_707, 141), Err(BUMP_CHANGED.to_string()));
     }
 
     #[test]
@@ -875,7 +914,8 @@ mod rbf_tests {
         let mut risen = info();
         risen.min_sat_vb = 5.0;
         assert!(plan_replacement(&risen, OWN, &[], 282).is_err());
-        assert_eq!(replacement_at(&risen, OWN, &[], 282), Ok(reviewed));
+        let size = reviewed.vsize;
+        assert_eq!(replacement_at(&risen, OWN, &[], 282, size), Ok(reviewed));
     }
 
     fn spare(txid: &str, amount: u64) -> Utxo {
@@ -898,7 +938,7 @@ mod rbf_tests {
         let plan = plan_replacement(&info(), OWN, &spares, 45_000).unwrap();
         assert_eq!(plan.inputs[1].txid, "22".repeat(32), "the 2,000 sat coin can't cover a 5,000 sat gap");
         assert_eq!(plan.change_sats, Some(150_000 - 60_000 - 45_000));
-        assert_eq!(replacement_at(&info(), OWN, &spares, plan.fee), Ok(plan));
+        assert_eq!(replacement_at(&info(), OWN, &spares, plan.fee, plan.vsize), Ok(plan));
         assert_eq!(plan_replacement(&info(), OWN, &spares[..1], 45_000), Err(CANNOT_COVER.to_string()));
     }
 
@@ -907,20 +947,33 @@ mod rbf_tests {
         let spares = [spare("22", 5_200)];
         let reviewed = plan_replacement(&info(), OWN, &spares, 45_000).unwrap();
         assert_eq!((reviewed.change_sats, reviewed.fee, reviewed.vsize), (None, 45_200, 178));
-        assert_eq!(replacement_at(&info(), OWN, &spares, reviewed.fee), Ok(reviewed));
+        assert_eq!(replacement_at(&info(), OWN, &spares, reviewed.fee, reviewed.vsize), Ok(reviewed));
+    }
+
+    #[test]
+    fn a_spent_coin_that_changes_the_size_is_refused_at_signing() {
+        let both = [spare("22", 5_200), spare("23", 9_000)];
+        let reviewed = plan_replacement(&info(), OWN, &both, 45_000).unwrap();
+        assert_eq!((reviewed.fee, reviewed.vsize), (45_200, 178));
+        let left = [spare("23", 9_000)];
+        assert_eq!(
+            replacement_at(&info(), OWN, &left, reviewed.fee, reviewed.vsize),
+            Err(BUMP_CHANGED.to_string()),
+            "the same fee over a bigger transaction is a lower rate"
+        );
     }
 
     #[test]
     fn descendants_and_foreign_inputs_refuse_with_their_reasons() {
         let mut i = info(); i.descendants = 1;
         assert_eq!(plan_replacement(&i, OWN, &[], 1_000), Err(LATER_SEND.to_string()));
-        assert_eq!(replacement_at(&i, OWN, &[], 1_000), Err(LATER_SEND.to_string()));
+        assert_eq!(replacement_at(&i, OWN, &[], 1_000, 141), Err(LATER_SEND.to_string()));
         let mut i = info(); i.inputs[0].address = Some("bc1qsomeoneelse".into());
         assert_eq!(plan_replacement(&i, OWN, &[], 1_000), Err(NOT_OURS.to_string()));
         let mut max = info();
         max.outputs.pop();
         max.fee_sats = 40_000;
-        assert_eq!(replacement_at(&max, OWN, &[], 41_000), Err(CANNOT_COVER.to_string()), "a send with nothing left over");
+        assert_eq!(replacement_at(&max, OWN, &[], 41_000, 110), Err(CANNOT_COVER.to_string()), "a send with nothing left over");
     }
 
     #[test]
@@ -941,9 +994,10 @@ mod rbf_tests {
 
     #[test]
     fn a_tier_is_priced_at_the_replacement_size() {
-        let plan = quote_replacement(&info(), OWN, &[], 10.0).unwrap();
-        assert_eq!(plan.fee, 1_410);
-        assert!(quote_replacement(&info(), OWN, &[], 1.0).is_err());
+        let p = price_replacement(&info(), OWN, &[], 10.0);
+        assert_eq!((p.fee(), p.vsize()), (1_410, 141));
+        assert!(p.clears(&info()));
+        assert!(!price_replacement(&info(), OWN, &[], 1.0).clears(&info()));
     }
 }
 
@@ -1032,6 +1086,7 @@ mod offer_tests {
                 coin("free", 5_923, 965_711, None),
                 coin("consumed", 5_802, 969_974, Some("33cf")),
                 coin("foreign", 100, 0, None),
+                coin("empty", 0, 965_000, None),
             ],
         ));
         let offered: Vec<String> = eligible_utxos(wallet).unwrap().into_iter().map(|u| u.txid).collect();

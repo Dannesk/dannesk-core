@@ -1,6 +1,6 @@
 use crate::channel::{BtcRbfInfo, CHANNEL};
 use crate::utils::btc_send::printed_rate;
-use crate::ws::commands::bitcoin_payment::{min_replacement_fee, quote_replacement, rbf_info_for, replacement, spare_coins, tier_sats_at, Utxo};
+use crate::ws::commands::bitcoin_payment::{min_replacement_fee, price_replacement, rbf_info_for, spare_coins, BumpPrice, Utxo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,56 +28,66 @@ pub struct BtcBumpQuote {
     pub custom: Option<BumpFee>,
 }
 
-fn printed_below(rate: f32) -> f32 {
-    let r = rate as f64;
-    let step = if r <= 10.0 { 0.01 } else if r <= 100.0 { 0.1 } else { 1.0 };
-    if r - step <= 0.0 { 0.0 } else { printed_rate(r - step) }
+/// The printed rates.
+fn printed_at(i: u32) -> f32 {
+    let v = if i < 1000 {
+        i as f64 / 100.0
+    } else if i < 1900 {
+        (i - 900) as f64 / 10.0
+    } else {
+        (i - 1800) as f64
+    };
+    printed_rate(v)
 }
 
-
-fn lowest_rate(fee: u64, vsize: u64) -> f32 {
-    let mut rate = printed_rate(fee as f64 / vsize.max(1) as f64);
-    for _ in 0..2 {
-        let below = printed_below(rate);
-        if below > 0.0 && tier_sats_at(below, vsize) >= fee {
-            rate = below;
-        } else {
-            break;
-        }
+fn index_of(rate: f32) -> u32 {
+    let r = (rate as f64 * 1e6).round() / 1e6;
+    if r < 10.0 {
+        (r * 100.0).round() as u32
+    } else if r < 100.0 {
+        (r * 10.0).round() as u32 + 900
+    } else {
+        r.round() as u32 + 1800
     }
-    rate
 }
 
-/// The lowest rate the network is willing to take for replacement.
+/// The highest rate searched
+const TOP: u32 = 101_800;
+
+/// The lowest printed rate whose replacement the network will take, which we find by halving since a higher rate never pays less.
 fn min_rate(info: &BtcRbfInfo, own: &str, spares: &[Utxo]) -> f32 {
-    let mut vsize = info.vsize;
-    let mut floor = min_replacement_fee(info, vsize);
-    for _ in 0..3 {
-        match replacement(info, own, spares, floor, Some(info.min_sat_vb)) {
-            Ok(plan) if plan.vsize != vsize => {
-                vsize = plan.vsize;
-                floor = min_replacement_fee(info, vsize);
-            }
-            _ => break,
+    let clears = |i: u32| price_replacement(info, own, spares, printed_at(i)).clears(info);
+    let floor = min_replacement_fee(info, info.vsize);
+    let mut hi = index_of(printed_rate(floor as f64 / info.vsize.max(1) as f64)).max(1);
+    while !clears(hi) && hi < TOP {
+        hi = (hi * 2).min(TOP);
+    }
+    let mut lo = 0;
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if clears(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
         }
     }
-    lowest_rate(floor, vsize)
+    printed_at(hi)
 }
 
 pub fn price(draft: &BtcBumpDraft, info: &BtcRbfInfo, own: &str, spares: &[Utxo], tiers: [f32; 4]) -> BtcBumpQuote {
-    let bump = |rate: f32, fee: u64, vsize: u64, adds_coin: bool| BumpFee {
+    let bump = |rate: f32, p: &BumpPrice| BumpFee {
         rate,
-        fee,
-        vsize,
-        extra: fee.saturating_sub(info.fee_sats),
-        adds_coin,
+        fee: p.fee(),
+        vsize: p.vsize(),
+        extra: p.fee().saturating_sub(info.fee_sats),
+        adds_coin: match p {
+            BumpPrice::Built(plan) => plan.added_input,
+            BumpPrice::Unbuilt { adds_coin, .. } => *adds_coin,
+        },
     };
-    let at = |rate: f32, floor: bool| match quote_replacement(info, own, spares, rate) {
-        Ok(plan) => Some(bump(rate, plan.fee, plan.vsize, plan.added_input)),
-        Err(_) => {
-            let fee = tier_sats_at(rate, info.vsize);
-            (!floor || fee >= min_replacement_fee(info, info.vsize)).then(|| bump(rate, fee, info.vsize, false))
-        }
+    let at = |rate: f32, floor: bool| {
+        let p = price_replacement(info, own, spares, rate);
+        (!floor || p.clears(info)).then(|| bump(rate, &p))
     };
     let custom = draft
         .custom
@@ -143,6 +153,7 @@ pub async fn quote_task() {
 mod tests {
     use super::*;
     use crate::channel::{BtcRbfInput, BtcRbfOutput};
+    use crate::ws::commands::bitcoin_payment::{replacement_at, tier_sats_at};
 
     const OWN: &str = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
     const THEM_SPK: &str = "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -230,5 +241,96 @@ mod tests {
         max.inputs[0].sats = 300_000;
         let q = price(&draft(None), &max, OWN, &[], [0.10, 0.52, 400.0, 500.0]);
         assert_eq!(q.tiers[2].map(|b| (b.fee, b.adds_coin)), Some((56_400, false)));
+    }
+
+    fn spent(sats: u64, fee: u64, leftover: u64, vsize: u64, min: f32) -> BtcRbfInfo {
+        let mut info = sent();
+        info.inputs[0].sats = sats;
+        info.outputs[0].sats = sats - fee - leftover;
+        if leftover == 0 {
+            info.outputs.pop();
+        } else {
+            info.outputs[1].sats = leftover;
+        }
+        info.fee_sats = fee;
+        info.vsize = vsize;
+        info.min_sat_vb = min;
+        info
+    }
+
+    fn coin(txid: &str, amount: u64) -> Utxo {
+        Utxo { txid: txid.repeat(32), vout: 1, amount, address: OWN.into() }
+    }
+
+    #[test]
+    fn a_bump_that_needs_a_coin_is_priced_at_the_size_it_signs() {
+        let max = spent(51_100, 1_100, 0, 110, 1.0);
+        let spares = [coin("22", 50_000)];
+        let q = price(&draft(None), &max, OWN, &spares, [1.0, 2.0, 5.0, 12.0]);
+        assert_eq!(q.min_rate, 10.1);
+        let high = q.tiers[3].unwrap();
+        assert_eq!((high.fee, high.vsize, high.adds_coin), (2_508, 209, true));
+        let signed = replacement_at(&max, OWN, &spares, high.fee, high.vsize).unwrap();
+        assert_eq!((signed.fee, signed.vsize), (2_508, 209));
+        let q = price(&draft(Some("10.1")), &max, OWN, &spares, [1.0, 2.0, 5.0, 12.0]);
+        let custom = q.custom.unwrap();
+        assert_eq!((custom.fee, custom.vsize, custom.adds_coin), (2_111, 209, true));
+        assert!(replacement_at(&max, OWN, &spares, custom.fee, custom.vsize).is_ok());
+    }
+
+    #[test]
+    fn a_fee_the_extra_coin_cannot_reach_is_left_for_signing_to_refuse() {
+        let max = spent(50_110, 110, 0, 110, 1.0);
+        let spares = [coin("22", 900)];
+        let q = price(&draft(None), &max, OWN, &spares, [1.0, 2.0, 3.0, 5.0]);
+        let high = q.tiers[3].unwrap();
+        assert_eq!((high.fee, high.vsize, high.adds_coin), (1_045, 209, true), "never 550 sat at 110 vB, which would sign at half the rate");
+        assert!(replacement_at(&max, OWN, &spares, high.fee, high.vsize).is_err());
+    }
+
+    #[test]
+    fn the_minimum_steps_down_to_the_last_rate_that_clears() {
+        let q = price(&draft(None), &spent(300_000, 45, 49_955, 141, 0.10), OWN, &[], TODAY);
+        assert_eq!(q.min_rate, 0.42);
+    }
+
+    #[test]
+    fn a_leftover_paid_to_the_fee_lowers_the_minimum() {
+        let info = spent(251_105, 705, 400, 141, 5.0);
+        let q = price(&draft(Some("5")), &info, OWN, &[], [5.0, 5.5, 6.0, 7.0]);
+        assert_eq!(q.min_rate, 4.37);
+        let custom = q.custom.unwrap();
+        assert_eq!((custom.fee, custom.vsize), (1_105, 110));
+        assert!(custom.rate >= q.min_rate);
+        assert_eq!(q.tiers[1].map(|b| b.fee), Some(1_105));
+    }
+
+    #[test]
+    fn the_minimum_agrees_with_every_rate_the_network_takes() {
+        let cases: Vec<(BtcRbfInfo, Vec<Utxo>)> = vec![
+            (sent(), vec![]),
+            (spent(300_000, 45, 49_955, 141, 0.10), vec![]),
+            (spent(251_105, 705, 400, 141, 5.0), vec![]),
+            (spent(51_100, 1_100, 0, 110, 1.0), vec![coin("22", 50_000)]),
+            (spent(50_110, 110, 0, 110, 1.0), vec![coin("22", 900)]),
+            (spent(251_105, 705, 400, 141, 5.0), vec![coin("21", 300), coin("22", 2_000), coin("23", 90_000)]),
+            (BtcRbfInfo { descendants: 1, ..sent() }, vec![]),
+        ];
+        for (info, spares) in cases {
+            let min = min_rate(&info, OWN, &spares);
+            for i in 1..2_100 {
+                let rate = printed_at(i);
+                let clears = price_replacement(&info, OWN, &spares, rate).clears(&info);
+                assert_eq!(clears, rate >= min, "fee {} at {} vB, rate {rate}, minimum {min}", info.fee_sats, info.vsize);
+            }
+        }
+    }
+
+    #[test]
+    fn the_printed_rates_index_both_ways() {
+        for i in 1..2_500 {
+            assert_eq!(index_of(printed_at(i)), i, "{}", printed_at(i));
+        }
+        assert_eq!([printed_at(999), printed_at(1000), printed_at(1899), printed_at(1900)], [9.99, 10.0, 99.9, 100.0]);
     }
 }

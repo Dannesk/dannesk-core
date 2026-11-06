@@ -19,12 +19,16 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
             return Err("Error: Invalid transaction fee format".to_string());
         }
     };
+    let Some(vsize) = cmd.vsize.filter(|v| *v > 0) else {
+        fail_log("Invalid transaction size");
+        return Err("Error: no reviewed size".to_string());
+    };
     let Some(old_txid) = cmd.replaces.clone() else {
         fail_log("No transaction to replace");
         return Err("Error: no transaction to replace".to_string());
     };
 
-    let info = match bitcoin_payment::rbf_info_for(&old_txid) {
+    let info = match bitcoin_payment::rbf_record_for(&old_txid) {
         Ok(info) => info,
         Err(e) => {
             fail_log(&e);
@@ -54,7 +58,7 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
     advance_log("auth", "build");
 
     let spares = bitcoin_payment::spare_coins(&wallet, &info);
-    let plan = match bitcoin_payment::replacement_at(&info, &wallet, &spares, fee) {
+    let plan = match bitcoin_payment::replacement_at(&info, &wallet, &spares, fee, vsize) {
         Ok(p) => p,
         Err(e) => {
             fail_log(&e);
