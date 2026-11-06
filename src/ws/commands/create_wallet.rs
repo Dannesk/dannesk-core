@@ -42,7 +42,7 @@ pub async fn execute(_current_wallet: String, cmd: WSCommand) -> Result<(), Stri
         }
     }
 
-    // WS sent — advance connect → verify
+  
     let mut log_opt = CHANNEL.activity_tx.borrow().clone();
     if let Some(ref mut log) = log_opt {
         log.finish("connect");
@@ -77,7 +77,6 @@ pub async fn process_response(
                     .map(|b| b / 1_000_000.0)
                     .unwrap_or(0.0);
 
-                // Relay acknowledged the subscription — advance to save step.
                 let mut log_opt = CHANNEL.activity_tx.borrow().clone();
                 if let Some(ref mut log) = log_opt {
                     log.finish("verify");
@@ -138,7 +137,7 @@ pub async fn process_response(
 
              
                 for token in crate::utils::tokens::TOKENS {
-                    CHANNEL.set_token(token.code, (0.0, false, None));
+                    CHANNEL.set_token(token.code, (0.0, false, None, "0".to_string()));
                 }
               
                 CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.xrp, true));

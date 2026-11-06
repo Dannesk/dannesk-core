@@ -27,18 +27,19 @@ fn parse_asset(
     has_key: &str,
     balance_key: &str,
     limit_key: &str,
-) -> (f64, bool, Option<f64>) {
+) -> crate::channel::TokenState {
     let has = data.get(has_key).and_then(|h| h.as_bool()).unwrap_or(false);
-    let balance = data
+    let exact = data
         .get(balance_key)
         .and_then(|b| b.as_str())
-        .and_then(|b| b.parse::<f64>().ok())
-        .unwrap_or(0.0);
+        .and_then(crate::utils::tokens::plain_decimal)
+        .unwrap_or_else(|| "0".to_string());
+    let balance = exact.parse::<f64>().unwrap_or(0.0);
     let limit = data
         .get(limit_key)
         .and_then(|l| l.as_str())
         .and_then(|l| l.parse::<f64>().ok());
-    (balance, has, limit)
+    (balance, has, limit, exact)
 }
 
 
@@ -163,13 +164,13 @@ pub async fn process_response(
                 CHANNEL.clear_xrp_account();
                 CHANNEL.apply_xrp_account(&data);
                 for token in crate::utils::tokens::TOKENS {
-                    let (balance, has, limit) = parse_asset(
+                    let state = parse_asset(
                         &data,
                         token.has_field,
                         token.balance_field,
                         token.trustline_limit_field,
                     );
-                    CHANNEL.set_token(token.code, (balance, has, limit));
+                    CHANNEL.set_token(token.code, state);
                 }
 
                

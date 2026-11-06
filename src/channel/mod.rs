@@ -82,7 +82,8 @@ pub struct ServiceHealth {
 }
 
 
-pub type TokenState = (f64, bool, Option<f64>);
+
+pub type TokenState = (f64, bool, Option<f64>, String);
 
 
 #[derive(Debug, Clone, Default)]
@@ -255,6 +256,10 @@ pub struct Channel {
     pub btc_send_draft_rx: watch::Receiver<Option<crate::utils::btc_send::BtcSendDraft>>,
     pub btc_send_quote_tx: watch::Sender<Option<crate::utils::btc_send::BtcSendQuote>>,
     pub btc_send_quote_rx: watch::Receiver<Option<crate::utils::btc_send::BtcSendQuote>>,
+    pub btc_bump_draft_tx: watch::Sender<Option<crate::utils::btc_bump::BtcBumpDraft>>,
+    pub btc_bump_draft_rx: watch::Receiver<Option<crate::utils::btc_bump::BtcBumpDraft>>,
+    pub btc_bump_quote_tx: watch::Sender<Option<crate::utils::btc_bump::BtcBumpQuote>>,
+    pub btc_bump_quote_rx: watch::Receiver<Option<crate::utils::btc_bump::BtcBumpQuote>>,
 
     pub wallet_balance_tx: watch::Sender<(f64, Option<String>, bool, KeyMode)>,
     pub wallet_balance_rx: watch::Receiver<(f64, Option<String>, bool, KeyMode)>,
@@ -306,6 +311,8 @@ impl Channel {
         let (trade_quote_tx, trade_quote_rx) = watch::channel(None);
         let (btc_send_draft_tx, btc_send_draft_rx) = watch::channel(None);
         let (btc_send_quote_tx, btc_send_quote_rx) = watch::channel(None);
+        let (btc_bump_draft_tx, btc_bump_draft_rx) = watch::channel(None);
+        let (btc_bump_quote_tx, btc_bump_quote_rx) = watch::channel(None);
 
         let (wallet_balance_tx, wallet_balance_rx) = watch::channel((0.0, None, false, KeyMode::Standard));
 
@@ -371,6 +378,10 @@ impl Channel {
             btc_send_draft_rx,
             btc_send_quote_tx,
             btc_send_quote_rx,
+            btc_bump_draft_tx,
+            btc_bump_draft_rx,
+            btc_bump_quote_tx,
+            btc_bump_quote_rx,
 
             wallet_balance_tx,
             wallet_balance_rx,
@@ -410,8 +421,8 @@ impl Channel {
         self.tokens_rx
             .borrow()
             .get(code)
-            .copied()
-            .unwrap_or((0.0, false, None))
+            .cloned()
+            .unwrap_or_else(|| (0.0, false, None, "0".to_string()))
     }
 
 
@@ -420,9 +431,11 @@ impl Channel {
             .send_modify(|m| { m.insert(code.to_string(), state); });
     }
 
-    pub fn set_token_balance(&self, code: &str, balance: f64) {
+    pub fn set_token_balance(&self, code: &str, balance: f64, exact: String) {
         self.tokens_tx.send_modify(|m| {
-            m.entry(code.to_string()).or_insert((0.0, false, None)).0 = balance;
+            let state = m.entry(code.to_string()).or_insert_with(|| (0.0, false, None, "0".to_string()));
+            state.0 = balance;
+            state.3 = exact;
         });
     }
 
@@ -452,7 +465,7 @@ impl Channel {
 
     pub fn set_xrp_exists(&self, exists: bool) {
         self.tokens_tx.send_modify(|m| {
-            m.entry("XRP".to_string()).or_insert((0.0, false, None)).1 = exists;
+            m.entry("XRP".to_string()).or_insert_with(|| (0.0, false, None, "0".to_string())).1 = exists;
         });
     }
 

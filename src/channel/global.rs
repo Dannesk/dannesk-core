@@ -179,6 +179,7 @@ pub struct WSCommand {
     pub passphrase: Option<SecureString>,
     pub trustline_limit: Option<String>,
     pub fee: Option<String>,
+    pub vsize: Option<u64>,
     pub tx_type: Option<String>,
     pub taker_pays: Option<(String, String)>,
     pub taker_gets: Option<(String, String)>,

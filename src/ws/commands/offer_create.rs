@@ -87,9 +87,9 @@ fn normalize_issued_value(amount_str: &str) -> Result<String, String> {
     if sig_digits == 0 {
         return Err("Amount must be greater than zero.".to_string());
     }
-    if sig_digits > 15 {
+    if sig_digits > 16 {
         return Err(
-            "Amount has too many significant digits (max 15 for issued currencies).".to_string(),
+            "Amount has too many significant digits (max 16 for issued currencies).".to_string(),
         );
     }
 

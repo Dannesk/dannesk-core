@@ -24,27 +24,43 @@ pub fn kinds_of(coins: &[Utxo]) -> Vec<BtcScriptType> {
 }
 
 
-pub fn vsize_for(inputs: &[BtcScriptType], out_spk_lens: &[usize]) -> u64 {
-    fn varint(n: usize) -> u64 {
-        if n < 0xfd { 1 } else { 3 }
-    }
-    let outs: u64 = out_spk_lens
-        .iter()
-        .map(|l| 8 + varint(*l) + *l as u64)
-        .sum();
-    let ins: u64 = inputs.iter().map(|k| 41 + k.script_sig_len()).sum();
-    let witness: u64 = inputs.iter().map(|k| k.witness_len()).sum();
-    let base = 4 + varint(inputs.len()) + ins + varint(out_spk_lens.len()) + outs + 4;
+fn varint(n: usize) -> u64 {
+    if n < 0xfd { 1 } else { 3 }
+}
+
+fn outputs_len(out_spk_lens: &[usize]) -> u64 {
+    out_spk_lens.iter().map(|l| 8 + varint(*l) + *l as u64).sum()
+}
+
+fn sized(inputs: usize, ins: u64, witness: u64, outputs: usize, outs: u64) -> u64 {
+    let base = 4 + varint(inputs) + ins + varint(outputs) + outs + 4;
     if witness == 0 {
         return base;
     }
     (base * 4 + 2 + witness).div_ceil(4)
 }
 
+pub fn vsize_for(inputs: &[BtcScriptType], out_spk_lens: &[usize]) -> u64 {
+    let ins: u64 = inputs.iter().map(|k| 41 + k.script_sig_len()).sum();
+    let witness: u64 = inputs.iter().map(|k| k.witness_len()).sum();
+    sized(inputs.len(), ins, witness, out_spk_lens.len(), outputs_len(out_spk_lens))
+}
+
+/// vsize_for of every prefix of the inputs
+pub fn prefix_vsizes<'a>(inputs: &'a [BtcScriptType], out_spk_lens: &'a [usize]) -> impl Iterator<Item = u64> + 'a {
+    let outs = outputs_len(out_spk_lens);
+    let (mut ins, mut witness) = (0u64, 0u64);
+    inputs.iter().enumerate().map(move |(i, k)| {
+        ins += 41 + k.script_sig_len();
+        witness += k.witness_len();
+        sized(i + 1, ins, witness, out_spk_lens.len(), outs)
+    })
+}
+
 
 pub fn tier_sats_at(rate: f32, vsize: u64) -> u64 {
-  
-    let raw = rate as f64 * vsize as f64;
+    let rate = (rate as f64 * 1e6).round() / 1e6;
+    let raw = rate * vsize as f64;
     ((raw * 1e6).round() / 1e6).ceil() as u64
 }
 
@@ -197,13 +213,23 @@ pub async fn construct_transaction(
 
     // Add change output if necessary
     let change = total_input - amount - fee;
-    if change >= DUST_SATS {
+    let change_kind = BtcScriptType::of_address(&wallet_obj.address).unwrap_or_else(crate::btc_script_type::stored);
+    if change >= change_floor(change_kind, None) {
         let change_addr = Address::parse(&wallet_obj.address)
             .map_err(|e| format!("Invalid change address: {}", e))?;
         tx.output.push(TxOut {
             value: change,
             script_pubkey: change_addr.script_pubkey(),
         });
+    } else if change > 0 {
+        return Err(COINS_CHANGED.to_string());
+    }
+
+    if let Some(reviewed) = cmd.vsize {
+        let lens: Vec<usize> = tx.output.iter().map(|o| o.script_pubkey.len()).collect();
+        if vsize_for(&kinds_of(&selected_utxos), &lens) != reviewed {
+            return Err(COINS_CHANGED.to_string());
+        }
     }
 
     sign_inputs(&mut tx, &selected_utxos, wallet_obj)?;
@@ -290,7 +316,32 @@ fn sign_inputs(
 }
 
 
-pub const DUST_SATS: u64 = 546;
+/// bitcoin core's default dust relay fee in sat/vB.
+pub const DUST_RELAY_FEE: f32 = 3.0;
+
+/// bitcoin core's default discard fee in sat/vB
+pub const DISCARD_FEE: f32 = 10.0;
+
+/// coins change response.
+pub const COINS_CHANGED: &str = "Your coins changed since review. Review the send again.";
+
+/// bump change response.
+pub const BUMP_CHANGED: &str = "Your coins changed since review. Review the bump again.";
+
+const LATER_SEND: &str = "A later send already spends this one's leftover, so its fee can't be raised.";
+const CANNOT_COVER: &str = "Not enough is left over to pay the higher fee, and no other coin can cover it.";
+const NOT_OURS: &str = "Not every coin in this send belongs to this wallet.";
+const NO_REBUILD: &str = "An output of this send can't be rebuilt.";
+
+pub fn dust_size(spk_len: usize, witness: bool) -> u64 {
+    9 + spk_len as u64 + if witness { 67 } else { 148 }
+}
+
+pub fn change_floor(kind: BtcScriptType, slowest: Option<f32>) -> u64 {
+    let rate = slowest.map_or(DUST_RELAY_FEE, |r| r.clamp(DUST_RELAY_FEE, DISCARD_FEE));
+    let witness = matches!(kind, BtcScriptType::NativeSegwit | BtcScriptType::Taproot);
+    tier_sats_at(rate, dust_size(kind.spk_len(), witness))
+}
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,7 +367,7 @@ impl ReplacementPlan {
 
 
 pub fn min_replacement_fee(info: &crate::channel::BtcRbfInfo, vsize: u64) -> u64 {
-    let ceil_rate = |rate: f32| ((rate as f64 * vsize as f64 * 1e6).round() / 1e6).ceil() as u64;
+    let ceil_rate = |rate: f32| tier_sats_at(rate, vsize);
     let rule4 = info.fee_sats.saturating_add(ceil_rate(info.incremental_sat_vb));
     let relay_min = ceil_rate(info.min_sat_vb);
     let same_rate = (info.fee_sats as u128 * vsize as u128).div_ceil(info.vsize.max(1) as u128) as u64;
@@ -327,16 +378,45 @@ pub fn min_replacement_fee(info: &crate::channel::BtcRbfInfo, vsize: u64) -> u64
 pub fn plan_replacement(
     info: &crate::channel::BtcRbfInfo,
     own: &str,
-    spare: Option<&Utxo>,
+    spares: &[Utxo],
     fee: u64,
 ) -> Result<ReplacementPlan, String> {
+    let plan = replacement(info, own, spares, fee, Some(info.min_sat_vb))?;
+    let floor = min_replacement_fee(info, plan.vsize);
+    if plan.fee < floor {
+        return Err(format!("at least {floor} sats to replace it"));
+    }
+    Ok(plan)
+}
+
+/// The replacement signed at exactly the fee the command carries. refuse instead of paying more.
+pub fn replacement_at(
+    info: &crate::channel::BtcRbfInfo,
+    own: &str,
+    spares: &[Utxo],
+    fee: u64,
+) -> Result<ReplacementPlan, String> {
+    let plan = replacement(info, own, spares, fee, None)?;
+    if plan.fee != fee {
+        return Err(BUMP_CHANGED.to_string());
+    }
+    Ok(plan)
+}
+
+pub(crate) fn replacement(
+    info: &crate::channel::BtcRbfInfo,
+    own: &str,
+    spares: &[Utxo],
+    fee: u64,
+    slowest: Option<f32>,
+) -> Result<ReplacementPlan, String> {
     if info.descendants > 0 {
-        return Err("a later payment already spends this one's change".to_string());
+        return Err(LATER_SEND.to_string());
     }
     let mut inputs: Vec<Utxo> = Vec::with_capacity(info.inputs.len() + 1);
     for i in &info.inputs {
         let Some(address) = i.address.as_deref().filter(|a| *a == own) else {
-            return Err("not every input is this wallet's to re-sign".to_string());
+            return Err(NOT_OURS.to_string());
         };
         inputs.push(Utxo { txid: i.txid.clone(), vout: i.vout, amount: i.sats, address: address.to_string() });
     }
@@ -346,12 +426,12 @@ pub fn plan_replacement(
     let mut change_spk: Option<Vec<u8>> = None;
     for (idx, o) in info.outputs.iter().enumerate() {
         let spk = match (&o.spk, &o.address) {
-            (Some(hex), _) => hex::decode(hex).map_err(|e| format!("bad output script: {e}"))?,
+            (Some(hex), _) => hex::decode(hex).map_err(|_| NO_REBUILD.to_string())?,
             (None, Some(addr)) => Address::parse(addr)
                 .ok()
                 .map(|a| a.script_pubkey())
-                .ok_or_else(|| "an output's address can't be rebuilt".to_string())?,
-            (None, None) => return Err("an output has no script to rebuild".to_string()),
+                .ok_or_else(|| NO_REBUILD.to_string())?,
+            (None, None) => return Err(NO_REBUILD.to_string()),
         };
         if Some(idx) == change_idx {
             change_spk = Some(spk);
@@ -364,30 +444,24 @@ pub fn plan_replacement(
     let mut room = in_sum as i128 - keep_sum as i128 - fee as i128;
     let mut added_input = false;
     if room < 0 {
-        let Some(extra) = spare else {
-            return Err("this wallet can't cover the higher fee".to_string());
+        // The oldest spare coin that covers what the leftover cannot.
+        let Some(extra) = spares.iter().find(|c| c.amount as i128 >= -room) else {
+            return Err(CANNOT_COVER.to_string());
         };
         inputs.push(extra.clone());
         in_sum = in_sum.saturating_add(extra.amount);
         room += extra.amount as i128;
         added_input = true;
-        if room < 0 {
-            return Err("this wallet can't cover the higher fee".to_string());
-        }
     }
-    let change_sats = (room as u64 >= DUST_SATS).then_some(room as u64);
+    let change_kind = BtcScriptType::of_address(own).unwrap_or_else(crate::btc_script_type::stored);
+    let change_sats = (room as u64 >= change_floor(change_kind, slowest)).then_some(room as u64);
     let effective_fee = in_sum - keep_sum - change_sats.unwrap_or(0);
 
     let mut out_lens: Vec<usize> = keep.iter().map(|(spk, _)| spk.len()).collect();
     if change_sats.is_some() {
-        out_lens.push(change_spk.as_ref().map_or(crate::btc_script_type::stored().spk_len(), |s| s.len()));
+        out_lens.push(change_spk.as_ref().map_or(change_kind.spk_len(), |s| s.len()));
     }
     let vsize = vsize_for(&kinds_of(&inputs), &out_lens);
-
-    let floor = min_replacement_fee(info, vsize);
-    if effective_fee < floor {
-        return Err(format!("at least {floor} sats to replace it"));
-    }
     Ok(ReplacementPlan {
         inputs,
         keep,
@@ -400,24 +474,32 @@ pub fn plan_replacement(
 }
 
 
-pub fn rbf_info_for(txid: &str) -> Option<crate::channel::BtcRbfInfo> {
+
+pub fn rbf_info_for(txid: &str) -> Result<crate::channel::BtcRbfInfo, String> {
     let txs = CHANNEL.btc_transactions_rx.borrow();
-    let rec = txs.transactions.get(txid)?;
-    if rec.inputs.is_empty() || rec.outputs.is_empty() {
-        return None;
+    let Some(rec) = txs.transactions.get(txid) else {
+        return Err("This send isn't in view.".to_string());
+    };
+    if rec.status != crate::channel::BitcoinTransactionStatus::Pending {
+        return Err("This send is no longer pending.".to_string());
     }
-    let vsize = rec.vsize.filter(|v| *v > 0)?;
-    let fee_sats: u64 = rec.fees.parse().ok().filter(|f| *f > 0)?;
+    let details = || "This send's details aren't loaded yet.".to_string();
+    if rec.inputs.is_empty() || rec.outputs.is_empty() {
+        return Err(details());
+    }
+    let vsize = rec.vsize.filter(|v| *v > 0).ok_or_else(details)?;
+    let fee_sats: u64 = rec.fees.parse().ok().filter(|f| *f > 0).ok_or_else(details)?;
     let node = CHANNEL.btc_node_rx.borrow().clone();
-    let incremental_sat_vb = node.incremental_sat_vb?;
-    let min_sat_vb = node.tiers?[0];
+    let rates = || "Fee rates from the node aren't in yet.".to_string();
+    let incremental_sat_vb = node.incremental_sat_vb.ok_or_else(rates)?;
+    let min_sat_vb = node.tiers.ok_or_else(rates)?[0];
     let descendants = txs
         .transactions
         .values()
         .filter(|t| matches!(t.status, crate::channel::BitcoinTransactionStatus::Pending))
         .filter(|t| t.inputs.iter().any(|i| i.txid == txid))
         .count() as u32;
-    Some(crate::channel::BtcRbfInfo {
+    Ok(crate::channel::BtcRbfInfo {
         txid: txid.to_string(),
         vsize,
         fee_sats,
@@ -433,27 +515,29 @@ pub fn rbf_info_for(txid: &str) -> Option<crate::channel::BtcRbfInfo> {
 pub fn quote_replacement(
     info: &crate::channel::BtcRbfInfo,
     own: &str,
-    spare: Option<&Utxo>,
+    spares: &[Utxo],
     rate: f32,
 ) -> Result<ReplacementPlan, String> {
     let mut fee = tier_sats_at(rate, info.vsize);
-    let mut plan = plan_replacement(info, own, spare, fee)?;
+    let mut plan = plan_replacement(info, own, spares, fee)?;
     for _ in 0..3 {
         let next = tier_sats_at(rate, plan.vsize);
         if next == fee || next <= plan.fee && plan.change_sats.is_none() {
             break;
         }
         fee = next;
-        plan = plan_replacement(info, own, spare, fee)?;
+        plan = plan_replacement(info, own, spares, fee)?;
     }
     Ok(plan)
 }
 
 
-pub fn spare_coin(wallet: &str, info: &crate::channel::BtcRbfInfo) -> Option<Utxo> {
-    let (set_wallet, set) = CHANNEL.btc_utxos_rx.borrow().clone();
+/// The confirmed coins a bump can add, oldest first.
+pub fn spare_coins(wallet: &str, info: &crate::channel::BtcRbfInfo) -> Vec<Utxo> {
+    let guard = CHANNEL.btc_utxos_rx.borrow();
+    let (set_wallet, set) = &*guard;
     if set_wallet.as_deref() != Some(wallet) {
-        return None;
+        return Vec::new();
     }
     let mut coins: Vec<&crate::channel::BtcUtxo> = set
         .iter()
@@ -462,8 +546,9 @@ pub fn spare_coin(wallet: &str, info: &crate::channel::BtcRbfInfo) -> Option<Utx
         .collect();
     coins.sort_by(|a, b| (a.height, &a.txid, a.vout).cmp(&(b.height, &b.txid, b.vout)));
     coins
-        .first()
+        .into_iter()
         .map(|u| Utxo { txid: u.txid.clone(), vout: u.vout, amount: u.sats, address: u.address.clone() })
+        .collect()
 }
 
 
@@ -599,20 +684,102 @@ mod sign_tests {
     }
 
     #[tokio::test]
-    async fn a_leftover_below_dust_goes_to_the_fee() {
+    async fn a_leftover_under_the_floor_is_refused_not_paid() {
         let (wallet, coins) = wallet_of(BtcScriptType::NativeSegwit, 1);
         let send = |amount: &str| WSCommand {
             recipient: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_string()),
             amount: Some(amount.to_string()),
             ..Default::default()
         };
-        let tiny = construct_transaction(&wallet, &send("0.00048700"), "BTC", coins.clone(), "1100".to_string()).await.unwrap();
-        assert_eq!(Transaction::from_hex(&tiny).unwrap().output.len(), 1, "a 200 sat output is refused as dust");
+        let tiny = construct_transaction(&wallet, &send("0.00048700"), "BTC", coins.clone(), "1100".to_string()).await;
+        assert_eq!(tiny, Err(COINS_CHANGED.to_string()), "a 200 sat leftover was kept or paid");
+        let exact = construct_transaction(&wallet, &send("0.00048900"), "BTC", coins.clone(), "1100".to_string()).await.unwrap();
+        assert_eq!(Transaction::from_hex(&exact).unwrap().output.len(), 1);
         let hex = construct_transaction(&wallet, &send("0.00040000"), "BTC", coins.clone(), "1100".to_string()).await.unwrap();
         let tx = Transaction::from_hex(&hex).unwrap();
         assert_eq!(tx.output.len(), 2);
         assert_eq!(tx.output[1].value, 8_900);
         assert_eq!(tx.output[1].script_pubkey, Address::parse(&coins[0].address).unwrap().script_pubkey());
+    }
+
+    async fn built_as_quoted(wallet: &BitcoinWallet, kind: BtcScriptType, coins: &[Utxo], tiers: [f32; 4], typed: u64, max: bool) -> usize {
+        use crate::utils::btc_send::{price, BtcSendDraft};
+        let to = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let total: u64 = coins.iter().map(|c| c.amount).sum();
+        let btc = |sats: u64| format!("{:.8}", sats as f64 / 1e8);
+        let draft = BtcSendDraft { recipient: to.to_string(), amount: btc(typed), custom: Some("1.5".to_string()), max };
+        let quote = price(&draft, kind, Some(coins), Some(tiers));
+        let mut built = 0;
+        for t in quote.tiers.unwrap().into_iter().chain(quote.custom) {
+            let amount = if max { t.max } else { typed };
+            if amount + t.fee > total {
+                continue;
+            }
+            let cmd = WSCommand { recipient: Some(to.to_string()), amount: Some(btc(amount)), vsize: Some(t.vsize), ..Default::default() };
+            let hex = construct_transaction(wallet, &cmd, "BTC", coins.to_vec(), t.fee.to_string()).await.unwrap();
+            let tx = Transaction::from_hex(&hex).unwrap();
+            let spent: u64 = tx.input.iter().map(|i| coins[i.previous_output.vout as usize].amount).sum();
+            let sent: u64 = tx.output.iter().map(|o| o.value).sum();
+            assert_eq!(spent - sent, t.fee, "{kind:?} {amount} sat at {} sat/vB", t.rate);
+            let inputs = tx.input.len() as u64;
+            let slack = 1 + if kind == BtcScriptType::Legacy { 2 * inputs } else { inputs / 2 };
+            assert!(tx.vsize() <= t.vsize && t.vsize - tx.vsize() <= slack, "{kind:?} {amount} sat at {} sat/vB built {} vB, quoted {}", t.rate, tx.vsize(), t.vsize);
+            built += 1;
+        }
+        built
+    }
+
+    #[tokio::test]
+    async fn every_quote_is_the_fee_the_builder_pays() {
+        use BtcScriptType::*;
+        let (wallet, coins) = wallet_of(NativeSegwit, 2);
+        let mut built = 0;
+        for (typed, max) in [(10_000u64, false), (49_500, false), (49_700, false), (99_800, false), (0, true)] {
+            built += built_as_quoted(&wallet, NativeSegwit, &coins, [1.0, 2.0, 5.0, 10.0], typed, max).await;
+        }
+        built += built_as_quoted(&wallet, NativeSegwit, &coins, [12.0; 4], 47_500, false).await;
+        let (wallet, mut small) = wallet_of(NativeSegwit, 80);
+        for coin in small.iter_mut() {
+            coin.amount = 300;
+        }
+        small[79].amount = 1_000_000;
+        built += built_as_quoted(&wallet, NativeSegwit, &small, [4.0; 4], 2_000, false).await;
+        assert_eq!(built, 31);
+
+        for kind in [Taproot, NestedSegwit, Legacy] {
+            let (wallet, coins) = wallet_of(kind, 2);
+            let mut built = 0;
+            for (typed, max) in [(10_000u64, false), (49_500, false), (49_700, false), (0, true)] {
+                built += built_as_quoted(&wallet, kind, &coins, [1.0, 2.0, 5.0, 10.0], typed, max).await;
+            }
+            built += built_as_quoted(&wallet, kind, &coins, [12.0; 4], 47_500, false).await;
+            assert_eq!(built, 25, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_that_no_longer_has_the_reviewed_size_is_refused() {
+        let (wallet, mut coins) = wallet_of(BtcScriptType::NativeSegwit, 2);
+        coins[0].amount = 30_000;
+        coins[1].amount = 30_000;
+        let send = |vsize: u64| WSCommand {
+            recipient: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_string()),
+            amount: Some("0.00020000".to_string()),
+            vsize: Some(vsize),
+            ..Default::default()
+        };
+        let one = vsize_for(&[BtcScriptType::NativeSegwit], &[22, 22]);
+        assert!(construct_transaction(&wallet, &send(one), "BTC", coins.clone(), "141".to_string()).await.is_ok());
+        let split: Vec<Utxo> = [9_000u64, 9_000, 42_000]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Utxo { amount: *s, vout: i as u32 + 5, ..coins[0].clone() })
+            .collect();
+        assert_eq!(
+            construct_transaction(&wallet, &send(one), "BTC", split, "141".to_string()).await,
+            Err(COINS_CHANGED.to_string()),
+            "three coins at the fee of one would pay a lower rate than reviewed"
+        );
     }
 
     #[test]
@@ -660,7 +827,7 @@ mod rbf_tests {
 
     #[test]
     fn the_change_shrinks_and_the_recipient_is_untouched() {
-        let plan = plan_replacement(&info(), OWN, None, 1_000).unwrap();
+        let plan = plan_replacement(&info(), OWN, &[], 1_000).unwrap();
         assert_eq!(plan.fee, 1_000);
         assert_eq!(plan.change_sats, Some(39_000));
         assert_eq!(plan.keep, vec![(hex::decode(THEM_SPK).unwrap(), 60_000)]);
@@ -670,26 +837,55 @@ mod rbf_tests {
 
     #[test]
     fn bip125_floor_is_fee_plus_incremental_and_a_higher_rate() {
-        assert!(plan_replacement(&info(), OWN, None, 281).is_err());
-        assert_eq!(plan_replacement(&info(), OWN, None, 282).unwrap().fee, 282);
+        assert!(plan_replacement(&info(), OWN, &[], 281).is_err());
+        assert_eq!(plan_replacement(&info(), OWN, &[], 282).unwrap().fee, 282);
         assert_eq!(min_replacement_fee(&info(), 141), 282);
         let mut i = info(); i.min_sat_vb = 5.0;
         assert_eq!(min_replacement_fee(&i, 141), 705);
     }
 
     #[test]
-    fn a_sub_dust_remainder_is_absorbed_into_the_fee() {
-        let plan = plan_replacement(&info(), OWN, None, 39_500).unwrap();
-        assert_eq!(plan.change_sats, None);
-        assert_eq!(plan.fee, 40_000);
-        assert_eq!(plan.vsize, 110);
+    fn change_under_the_floor_is_absorbed_into_the_fee() {
+        let kept = plan_replacement(&info(), OWN, &[], 39_500).unwrap();
+        assert_eq!((kept.change_sats, kept.fee, kept.vsize), (Some(500), 39_500, 141));
+        let plan = plan_replacement(&info(), OWN, &[], 39_800).unwrap();
+        assert_eq!((plan.change_sats, plan.fee, plan.vsize), (None, 40_000, 110));
+        let mut busy = info();
+        busy.min_sat_vb = 10.0;
+        let plan = plan_replacement(&busy, OWN, &[], 39_500).unwrap();
+        assert_eq!((plan.change_sats, plan.fee), (None, 40_000));
+    }
+
+    #[test]
+    fn signing_builds_the_reviewed_replacement_at_the_commands_fee() {
+        let mut busy = info();
+        busy.min_sat_vb = 10.0;
+        let kept = plan_replacement(&info(), OWN, &[], 39_500).unwrap();
+        assert_eq!(replacement_at(&busy, OWN, &[], kept.fee), Ok(kept), "a fee rise after review changed the bump");
+        let absorbed = plan_replacement(&info(), OWN, &[], 39_800).unwrap();
+        assert_eq!(replacement_at(&busy, OWN, &[], absorbed.fee), Ok(absorbed));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_800), Err(BUMP_CHANGED.to_string()));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_706).map(|p| p.change_sats), Ok(Some(294)));
+        assert_eq!(replacement_at(&info(), OWN, &[], 39_707), Err(BUMP_CHANGED.to_string()));
+    }
+
+    #[test]
+    fn signing_leaves_the_replacement_minimum_to_review_and_the_node() {
+        let reviewed = plan_replacement(&info(), OWN, &[], 282).unwrap();
+        let mut risen = info();
+        risen.min_sat_vb = 5.0;
+        assert!(plan_replacement(&risen, OWN, &[], 282).is_err());
+        assert_eq!(replacement_at(&risen, OWN, &[], 282), Ok(reviewed));
+    }
+
+    fn spare(txid: &str, amount: u64) -> Utxo {
+        Utxo { txid: txid.repeat(32), vout: 1, amount, address: OWN.into() }
     }
 
     #[test]
     fn a_spare_coin_funds_what_the_change_cannot() {
-        let spare = Utxo { txid: "22".repeat(32), vout: 1, amount: 50_000, address: OWN.into() };
-        assert!(plan_replacement(&info(), OWN, None, 45_000).is_err());
-        let plan = plan_replacement(&info(), OWN, Some(&spare), 45_000).unwrap();
+        assert!(plan_replacement(&info(), OWN, &[], 45_000).is_err());
+        let plan = plan_replacement(&info(), OWN, &[spare("22", 50_000)], 45_000).unwrap();
         assert!(plan.added_input);
         assert_eq!(plan.inputs.len(), 2);
         assert_eq!(plan.change_sats, Some(150_000 - 60_000 - 45_000));
@@ -697,11 +893,34 @@ mod rbf_tests {
     }
 
     #[test]
-    fn descendants_and_foreign_inputs_refuse() {
+    fn the_added_coin_is_the_oldest_one_big_enough_to_pay() {
+        let spares = [spare("21", 2_000), spare("22", 50_000), spare("23", 90_000)];
+        let plan = plan_replacement(&info(), OWN, &spares, 45_000).unwrap();
+        assert_eq!(plan.inputs[1].txid, "22".repeat(32), "the 2,000 sat coin can't cover a 5,000 sat gap");
+        assert_eq!(plan.change_sats, Some(150_000 - 60_000 - 45_000));
+        assert_eq!(replacement_at(&info(), OWN, &spares, plan.fee), Ok(plan));
+        assert_eq!(plan_replacement(&info(), OWN, &spares[..1], 45_000), Err(CANNOT_COVER.to_string()));
+    }
+
+    #[test]
+    fn a_coin_that_leaves_less_than_the_floor_is_reviewed_and_signed_alike() {
+        let spares = [spare("22", 5_200)];
+        let reviewed = plan_replacement(&info(), OWN, &spares, 45_000).unwrap();
+        assert_eq!((reviewed.change_sats, reviewed.fee, reviewed.vsize), (None, 45_200, 178));
+        assert_eq!(replacement_at(&info(), OWN, &spares, reviewed.fee), Ok(reviewed));
+    }
+
+    #[test]
+    fn descendants_and_foreign_inputs_refuse_with_their_reasons() {
         let mut i = info(); i.descendants = 1;
-        assert!(plan_replacement(&i, OWN, None, 1_000).is_err());
+        assert_eq!(plan_replacement(&i, OWN, &[], 1_000), Err(LATER_SEND.to_string()));
+        assert_eq!(replacement_at(&i, OWN, &[], 1_000), Err(LATER_SEND.to_string()));
         let mut i = info(); i.inputs[0].address = Some("bc1qsomeoneelse".into());
-        assert!(plan_replacement(&i, OWN, None, 1_000).is_err());
+        assert_eq!(plan_replacement(&i, OWN, &[], 1_000), Err(NOT_OURS.to_string()));
+        let mut max = info();
+        max.outputs.pop();
+        max.fee_sats = 40_000;
+        assert_eq!(replacement_at(&max, OWN, &[], 41_000), Err(CANNOT_COVER.to_string()), "a send with nothing left over");
     }
 
     #[test]
@@ -713,7 +932,7 @@ mod rbf_tests {
             address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into()),
             spk: None,
         };
-        let plan = plan_replacement(&i, OWN, None, 1_000).unwrap();
+        let plan = plan_replacement(&i, OWN, &[], 1_000).unwrap();
         let want = Address::parse("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
             .unwrap()
             .script_pubkey();
@@ -722,9 +941,9 @@ mod rbf_tests {
 
     #[test]
     fn a_tier_is_priced_at_the_replacement_size() {
-        let plan = quote_replacement(&info(), OWN, None, 10.0).unwrap();
+        let plan = quote_replacement(&info(), OWN, &[], 10.0).unwrap();
         assert_eq!(plan.fee, 1_410);
-        assert!(quote_replacement(&info(), OWN, None, 1.0).is_err());
+        assert!(quote_replacement(&info(), OWN, &[], 1.0).is_err());
     }
 }
 
@@ -741,6 +960,7 @@ mod size_tests {
         assert_eq!(tier_sats_at(3.0, 140), 420);
         assert_eq!(tier_sats_at(2.5, 140), 350);
         assert_eq!(tier_sats_at(1.001, 140), 141);
+        assert_eq!([0.30, 1.10, 1.20].map(|r| tier_sats_at(r, 110)), [33, 121, 132]);
     }
 
  
@@ -755,6 +975,21 @@ mod size_tests {
         assert_eq!(vsize_for(&[NativeSegwit], &[34, 22]), 153);
     }
 
+
+    #[test]
+    fn the_running_size_of_every_prefix_is_vsize_for_it() {
+        use BtcScriptType::*;
+        let mixes: [&[BtcScriptType]; 4] = [&[NativeSegwit], &[Legacy, Legacy], &[Legacy, Taproot, NestedSegwit], &[Taproot, NativeSegwit]];
+        let shapes: [&[usize]; 3] = [&[22], &[22, 34], &[25, 22, 23]];
+        for outs in shapes {
+            for mix in mixes {
+                let inputs: Vec<BtcScriptType> = mix.iter().copied().cycle().take(300).collect();
+                for (i, size) in prefix_vsizes(&inputs, outs).enumerate() {
+                    assert_eq!(size, vsize_for(&inputs[..=i], outs), "{mix:?} {outs:?} at {} inputs", i + 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn vsize_per_input_family() {
@@ -816,6 +1051,7 @@ mod offer_tests {
             Some(wallet.to_string()),
             vec![coin("consumed", 5_802, 900_000, Some("33cf")), coin("free", 5_923, 965_711, None)],
         ));
-        assert_eq!(spare_coin(wallet, &info).map(|u| u.txid).as_deref(), Some("free"));
+        let spares: Vec<String> = spare_coins(wallet, &info).into_iter().map(|u| u.txid).collect();
+        assert_eq!(spares, vec!["free".to_string()]);
     }
 }

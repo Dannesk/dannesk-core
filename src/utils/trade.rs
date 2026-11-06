@@ -276,8 +276,8 @@ fn pays_whole_balance(t: &TradeTicket) -> bool {
     if pay == "XRP" || !t.anchor_is_pay() {
         return false;
     }
-    let balance = CHANNEL.token(pay).0;
-    balance > 0.0 && t.amount.trim().parse::<f64>().ok() == Some(balance)
+    let (balance, _, _, exact) = CHANNEL.token(pay);
+    balance > 0.0 && t.amount.trim() == exact
 }
 
 // rounds down when typed and up when derived, so bound always favours the signer
@@ -297,11 +297,6 @@ fn terms(t: &TradeTicket, limit: f64) -> Terms {
 fn amount_string(x: f64) -> String {
     let raw = format!("{:.*}", SIGN_PLACES, x);
     raw.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
-fn exact_amount(v: f64) -> String {
-    let s = format!("{v}");
-    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
 }
 
 fn xrp_fee() -> f64 {
@@ -450,7 +445,7 @@ pub fn compute(t: &TradeTicket) -> TradeQuote {
         _ => None,
     };
     let (pay, receive) = if signable {
-        let pay = if pays_whole_balance(t) { exact_amount(tm.pay) } else { amount_string(tm.pay) };
+        let pay = if pays_whole_balance(t) { CHANNEL.token(&pay_asset).3 } else { amount_string(tm.pay) };
         (Some(pay), Some(amount_string(tm.receive)))
     } else {
         (None, None)
@@ -487,7 +482,7 @@ pub fn compute(t: &TradeTicket) -> TradeQuote {
     }
 }
 
-// The legs: one for XRP pair and both for a cross
+// legs: one for XRP pair and both for a cross
 fn wanted_books(t: &TradeTicket) -> Vec<String> {
     let mut want = Vec::new();
     for leg in [&t.base, &t.quote] {
@@ -649,7 +644,5 @@ mod tests {
         assert_eq!(amount_string(1300.4), "1300.4");
         assert_eq!(amount_string(250.0), "250");
         assert_eq!(amount_string(floor_to(0.1234567, SIGN_PLACES)), "0.123456");
-        assert_eq!(exact_amount(8.342663), "8.342663");
-        assert_eq!(exact_amount(5.0), "5");
     }
 }

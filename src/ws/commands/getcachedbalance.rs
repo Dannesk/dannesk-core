@@ -75,11 +75,12 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
             CHANNEL.apply_xrp_account(&data);
        
             for token in crate::utils::tokens::TOKENS {
-                let balance = data
+                let exact = data
                     .get(token.balance_field)
                     .and_then(|v| v.as_str())
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0);
+                    .and_then(crate::utils::tokens::plain_decimal)
+                    .unwrap_or_else(|| "0".to_string());
+                let balance = exact.parse::<f64>().unwrap_or(0.0);
                 let has = data
                     .get(token.has_field)
                     .and_then(|h| h.as_bool())
@@ -88,7 +89,7 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
                     .get(token.trustline_limit_field)
                     .and_then(|l| l.as_str())
                     .and_then(|l| l.parse::<f64>().ok());
-                CHANNEL.set_token(token.code, (balance, has, limit));
+                CHANNEL.set_token(token.code, (balance, has, limit, exact));
             }
 
          

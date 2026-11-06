@@ -264,7 +264,7 @@ pub async fn execute(
     {
         Ok(h) => h,
         Err(e) => {
-            fail_log("Failed to build transaction");
+            fail_log(if e == bitcoin_payment::COINS_CHANGED { bitcoin_payment::COINS_CHANGED } else { "Failed to build transaction" });
             return Err(e);
         }
     };
@@ -312,7 +312,7 @@ pub async fn process_response(
 
             let command = data.get("command").and_then(|c| c.as_str());
 
-            // Server received the blob and is processing — no step change needed
+           
             if command == Some("bitcoin_submit_transaction")
                 && data.get("status").and_then(|s| s.as_str()) == Some("submitted")
             {

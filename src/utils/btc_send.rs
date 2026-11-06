@@ -1,6 +1,6 @@
 use crate::btc_script_type::{self, BtcScriptType};
 use crate::channel::CHANNEL;
-use crate::ws::commands::bitcoin_payment::{eligible_utxos, tier_sats_at, vsize_for, Utxo};
+use crate::ws::commands::bitcoin_payment::{change_floor, dust_size, eligible_utxos, prefix_vsizes, tier_sats_at, vsize_for, Utxo, DUST_RELAY_FEE};
 use dannesk_btc_codec::address::{Address, Kind};
 use serde::{Deserialize, Serialize};
 
@@ -9,13 +9,15 @@ pub struct BtcSendDraft {
     pub recipient: String,
     pub amount: String,
     pub custom: Option<String>,
+    pub max: bool,
 }
 
-/// fee in sats and max.
+/// fee in sats, the vsize it priced and the max.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct FeeQuote {
     pub rate: f32,
     pub fee: u64,
+    pub vsize: u64,
     pub max: u64,
 }
 
@@ -28,15 +30,9 @@ pub struct BtcSendQuote {
     pub custom: Option<FeeQuote>,
 }
 
-/// Bitcoin Core's default dust relay fee in sat/vB.
-const DUST_RELAY_FEE: u64 = 3;
-
 pub fn dust_limit(address: &Address) -> u64 {
-    let spend = match address.kind() {
-        Kind::P2wpkh | Kind::P2wsh | Kind::P2tr | Kind::OtherWitness => 67,
-        Kind::P2pkh | Kind::P2sh => 148,
-    };
-    DUST_RELAY_FEE * (9 + address.script_pubkey().len() as u64 + spend)
+    let witness = matches!(address.kind(), Kind::P2wpkh | Kind::P2wsh | Kind::P2tr | Kind::OtherWitness);
+    tier_sats_at(DUST_RELAY_FEE, dust_size(address.script_pubkey().len(), witness))
 }
 
 fn amount_sats(amount: &str) -> u64 {
@@ -48,43 +44,51 @@ fn amount_sats(amount: &str) -> u64 {
         .map_or(0, |v| (v * 100_000_000.0).round() as u64)
 }
 
-
-fn inputs_for_target(coins: &[Utxo], target: u64) -> Option<usize> {
-    let mut total = 0u64;
-    for (i, u) in coins.iter().enumerate() {
-        total += u.amount;
-        if total >= target {
-            return Some(i + 1);
-        }
+/// rounded up
+pub fn printed_rate(v: f64) -> f32 {
+    let up = |scale: f64| ((v * scale * 1e6).round() / 1e6).ceil() / scale;
+    let r = up(100.0);
+    if r < 10.0 {
+        return r as f32;
     }
-    None
+    let r = up(10.0);
+    if r < 100.0 {
+        return r as f32;
+    }
+    up(1.0) as f32
 }
 
-fn fee_at(rate: f32, coins: &[Utxo], kinds: &[BtcScriptType], own: BtcScriptType, amount: u64, recipient_len: usize) -> u64 {
-    let two_out = [recipient_len, own.spk_len()];
+fn priced(rate: f32, coins: &[Utxo], kinds: &[BtcScriptType], own: BtcScriptType, amount: u64, recipient_len: usize, floor: u64) -> (u64, u64) {
     let first = |n: usize| -> Vec<BtcScriptType> {
         if kinds.is_empty() { vec![own; n] } else { kinds[..n.min(kinds.len())].to_vec() }
     };
+    let at = |n: usize, outs: &[usize]| {
+        let vsize = vsize_for(&first(n), outs);
+        (tier_sats_at(rate, vsize), vsize)
+    };
+    let cover = |outs: &[usize]| {
+        let mut sum = 0u64;
+        coins.iter().zip(prefix_vsizes(kinds, outs)).enumerate().find_map(|(i, (coin, vsize))| {
+            sum += coin.amount;
+            let fee = tier_sats_at(rate, vsize);
+            (sum >= amount.saturating_add(fee)).then_some((i + 1, sum, fee, vsize))
+        })
+    };
+    let two_out = [recipient_len, own.spk_len()];
+    let one_out = [recipient_len];
+    let unaffordable = || at(coins.len().max(1), &two_out);
 
-    let mut n = 1usize;
-    let mut fee = tier_sats_at(rate, vsize_for(&first(n), &two_out));
-    for _ in 0..8 {
-        let needed = inputs_for_target(coins, amount.saturating_add(fee)).unwrap_or_else(|| coins.len().max(1));
-        if needed == n {
-            break;
-        }
-        n = needed;
-        fee = tier_sats_at(rate, vsize_for(&first(n), &two_out));
+    let change = cover(&two_out);
+    if amount == 0 {
+        return change.map_or_else(unaffordable, |(_, _, fee, vsize)| (fee, vsize));
     }
-
-    let total: u64 = coins.iter().map(|u| u.amount).sum();
-    if amount > 0 && total > 0 && amount.saturating_add(fee) > total {
-        let fee1 = tier_sats_at(rate, vsize_for(kinds, &[recipient_len]));
-        if amount.saturating_add(fee1) <= total {
-            return fee1;
-        }
+    match (change, cover(&one_out)) {
+        // Fewer coins without change always cost less than more coins with it.
+        (Some((n, held, fee, _)), Some((m, sum, _, size))) if m < n || held - amount - fee < floor => (sum - amount, size),
+        (Some((_, _, fee, vsize)), _) => (fee, vsize),
+        (None, Some((_, sum, _, size))) => (sum - amount, size),
+        (None, None) => unaffordable(),
     }
-    fee
 }
 
 pub fn price(draft: &BtcSendDraft, own: BtcScriptType, coins: Option<&[Utxo]>, tiers: Option<[f32; 4]>) -> BtcSendQuote {
@@ -95,16 +99,22 @@ pub fn price(draft: &BtcSendDraft, own: BtcScriptType, coins: Option<&[Utxo]>, t
     let recipient_len = recipient.as_ref().map_or(own.spk_len(), |a| a.script_pubkey().len());
     let amount = amount_sats(&draft.amount);
     let sweep = vsize_for(&kinds, &[recipient_len]);
-    let quote = |rate: f32| FeeQuote {
-        rate,
-        fee: fee_at(rate, held, &kinds, own, amount, recipient_len),
-        max: spendable.unwrap_or(0).saturating_sub(tier_sats_at(rate, sweep)),
+    let floor = change_floor(own, tiers.map(|t| t[0]));
+    let quote = |rate: f32| {
+        let swept = tier_sats_at(rate, sweep);
+        let (fee, vsize) = if draft.max && !held.is_empty() {
+            (swept, sweep)
+        } else {
+            priced(rate, held, &kinds, own, amount, recipient_len, floor)
+        };
+        FeeQuote { rate, fee, vsize, max: spendable.unwrap_or(0).saturating_sub(swept) }
     };
     let custom = draft
         .custom
         .as_deref()
-        .and_then(|r| r.trim().parse::<f32>().ok())
-        .filter(|r| r.is_finite() && *r > 0.0);
+        .and_then(|r| r.trim().parse::<f64>().ok())
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .map(printed_rate);
     BtcSendQuote {
         draft: draft.clone(),
         spendable,
@@ -169,18 +179,133 @@ mod tests {
     const AUGUST: [f32; 4] = [0.10, 0.13, 0.34, 1.09];
 
     fn coins(sats: &[u64]) -> Vec<Utxo> {
+        coins_at(OWN, sats)
+    }
+
+    fn coins_at(address: &str, sats: &[u64]) -> Vec<Utxo> {
         sats.iter()
             .enumerate()
-            .map(|(i, s)| Utxo { txid: format!("{:02x}", 0x11 + i).repeat(32), vout: 0, amount: *s, address: OWN.to_string() })
+            .map(|(i, s)| Utxo { txid: format!("{:02x}", 0x11 + i).repeat(32), vout: 0, amount: *s, address: address.to_string() })
             .collect()
     }
 
     fn draft(recipient: &str, amount: &str, custom: Option<&str>) -> BtcSendDraft {
-        BtcSendDraft { recipient: recipient.to_string(), amount: amount.to_string(), custom: custom.map(String::from) }
+        BtcSendDraft { recipient: recipient.to_string(), amount: amount.to_string(), custom: custom.map(String::from), max: false }
     }
 
     fn fees(q: &BtcSendQuote) -> [u64; 4] {
         q.tiers.unwrap().map(|t| t.fee)
+    }
+
+    fn sizes(q: &BtcSendQuote) -> [u64; 4] {
+        q.tiers.unwrap().map(|t| t.vsize)
+    }
+
+    #[test]
+    fn a_rate_rounds_up_to_the_places_it_prints() {
+        let cases = [(0.1, 0.10), (0.1013, 0.11), (0.13, 0.13), (2.004, 2.01), (9.994, 10.0), (18.44, 18.5), (99.96, 100.0), (312.47, 313.0)];
+        for (raw, shown) in cases {
+            assert_eq!(printed_rate(raw), shown as f32, "{raw}");
+        }
+    }
+
+    #[test]
+    fn rates_that_print_alike_cost_alike() {
+        let set = coins(&[5_000]);
+        let tiers = [0.1, 0.1013, 0.1036, 2.004].map(printed_rate);
+        let q = price(&BtcSendDraft::default(), BtcScriptType::NativeSegwit, Some(&set), Some(tiers));
+        assert_eq!(fees(&q), [15, 16, 16, 284]);
+        assert_eq!(sizes(&q), [141; 4]);
+    }
+
+    #[test]
+    fn under_max_every_tier_costs_its_own_sweep() {
+        let set = coins(&[5_000]);
+        let tiers = Some([0.10, 0.11, 0.11, 2.01]);
+        let max = BtcSendDraft { max: true, ..draft(P2WPKH, "0.00004987", None) };
+        let q = price(&max, BtcScriptType::NativeSegwit, Some(&set), tiers);
+        assert_eq!(fees(&q), [11, 13, 13, 222]);
+        assert_eq!(sizes(&q), [110; 4]);
+        assert_eq!(q.tiers.unwrap().map(|t| t.max + t.fee), [5_000; 4]);
+
+        let typed = draft(P2WPKH, "0.00004987", None);
+        let q = price(&typed, BtcScriptType::NativeSegwit, Some(&set), tiers);
+        assert_eq!(fees(&q), [13, 13, 13, 284]);
+        assert_eq!(sizes(&q), [110, 110, 110, 141]);
+    }
+
+    #[test]
+    fn change_under_the_floor_goes_to_the_fee() {
+        let set = coins(&[3_600]);
+        let q = price(&draft(P2WPKH, "0.00003100", None), BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST));
+        assert_eq!(fees(&q), [15, 19, 48, 154]);
+        assert_eq!(sizes(&q), [141; 4]);
+        let q = price(&draft(P2WPKH, "0.00003400", None), BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST));
+        assert_eq!(fees(&q), [200; 4]);
+        assert_eq!(sizes(&q), [110; 4]);
+    }
+
+    #[test]
+    fn the_change_floor_is_cores() {
+        use crate::ws::commands::bitcoin_payment::change_floor;
+        assert_eq!(change_floor(BtcScriptType::NativeSegwit, None), 294);
+        assert_eq!(change_floor(BtcScriptType::NativeSegwit, Some(0.10)), 294);
+        assert_eq!(change_floor(BtcScriptType::NativeSegwit, Some(5.0)), 490);
+        assert_eq!(change_floor(BtcScriptType::NativeSegwit, Some(40.0)), 980);
+        assert_eq!(change_floor(BtcScriptType::Taproot, None), 330);
+        assert_eq!(change_floor(BtcScriptType::NestedSegwit, None), 540);
+        assert_eq!(change_floor(BtcScriptType::Legacy, None), 546);
+    }
+
+    #[test]
+    fn the_floor_rises_with_the_slowest_rate() {
+        let set = coins(&[10_000]);
+        let q = price(&draft(P2WPKH, "0.00007000", None), BtcScriptType::NativeSegwit, Some(&set), Some([12.0; 4]));
+        assert_eq!((fees(&q)[0], sizes(&q)[0]), (1_692, 141));
+        let q = price(&draft(P2WPKH, "0.00007500", None), BtcScriptType::NativeSegwit, Some(&set), Some([12.0; 4]));
+        assert_eq!((fees(&q)[0], sizes(&q)[0]), (2_500, 110));
+        let q = price(&draft(P2WPKH, "0.00007500", None), BtcScriptType::NativeSegwit, Some(&set), Some([1.0; 4]));
+        assert_eq!((fees(&q)[0], sizes(&q)[0]), (141, 141));
+    }
+
+    #[test]
+    fn many_small_coins_ahead_of_a_big_one_are_walked() {
+        let mut sats = vec![300; 79];
+        sats.push(1_000_000);
+        let set = coins(&sats);
+        let q = price(&draft(P2WPKH, "0.00002000", None), BtcScriptType::NativeSegwit, Some(&set), Some([4.0; 4]));
+        assert_eq!(fees(&q), [22_132; 4]);
+        assert_eq!(sizes(&q), [5_533; 4]);
+    }
+
+    #[test]
+    fn fewer_coins_without_change_beat_more_coins_with_it() {
+        let set = coins(&[10_000, 400]);
+        let q = price(&draft(P2WPKH, "0.00009865", Some("1.2")), BtcScriptType::NativeSegwit, Some(&set), Some([1.0, 2.0, 3.0, 5.0]));
+        assert_eq!(fees(&q), [135, 535, 535, 1_045]);
+        assert_eq!(sizes(&q), [110, 178, 178, 209]);
+        assert_eq!(q.custom.map(|c| (c.fee, c.vsize)), Some((135, 110)));
+    }
+
+    #[test]
+    fn a_higher_rate_never_costs_less() {
+        let ladder = [0.10, 0.50, 1.0, 1.2, 2.0, 3.0, 5.0, 12.0, 40.0];
+        let sets: [&[u64]; 4] = [&[10_000, 400], &[3_600], &[30_000, 20_000, 5_000], &[300, 300, 300, 50_000]];
+        let wallets = [(BtcScriptType::NativeSegwit, OWN), (BtcScriptType::Taproot, P2TR), (BtcScriptType::NestedSegwit, P2SH), (BtcScriptType::Legacy, P2PKH)];
+        for (own, address) in wallets {
+            for sats in sets {
+                let held = coins_at(address, sats);
+                let total: u64 = sats.iter().sum();
+                for amount in (500..total).step_by(97) {
+                    let typed = format!("{:.8}", amount as f64 / 1e8);
+                    let fees = ladder.map(|r| {
+                        let q = price(&draft(P2WPKH, &typed, Some(&r.to_string())), own, Some(&held), Some([0.10; 4]));
+                        q.custom.unwrap().fee
+                    });
+                    assert!(fees.windows(2).all(|w| w[0] <= w[1]), "{own:?} {sats:?} sending {amount}: {fees:?}");
+                }
+            }
+        }
     }
 
     #[test]

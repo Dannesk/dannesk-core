@@ -24,9 +24,12 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
         return Err("Error: no transaction to replace".to_string());
     };
 
-    let Some(info) = bitcoin_payment::rbf_info_for(&old_txid) else {
-        fail_log("Fee-bump details not in view");
-        return Err("no details for this transaction".to_string());
+    let info = match bitcoin_payment::rbf_info_for(&old_txid) {
+        Ok(info) => info,
+        Err(e) => {
+            fail_log(&e);
+            return Err(e);
+        }
     };
 
     advance_log("init", "auth");
@@ -50,11 +53,11 @@ pub async fn execute(bitcoin_current_wallet: String, mut cmd: WSCommand) -> Resu
 
     advance_log("auth", "build");
 
-    let spare = bitcoin_payment::spare_coin(&wallet, &info);
-    let plan = match bitcoin_payment::plan_replacement(&info, &wallet, spare.as_ref(), fee) {
+    let spares = bitcoin_payment::spare_coins(&wallet, &info);
+    let plan = match bitcoin_payment::replacement_at(&info, &wallet, &spares, fee) {
         Ok(p) => p,
         Err(e) => {
-            fail_log("Failed to build replacement");
+            fail_log(&e);
             return Err(e);
         }
     };

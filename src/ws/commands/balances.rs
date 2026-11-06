@@ -77,10 +77,11 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
             .get(token.balance_field)
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("Missing {} field", token.balance_field))?;
-        let balance = raw
+        let exact = crate::utils::tokens::plain_decimal(raw).ok_or_else(|| format!("Invalid balance format: {}", raw))?;
+        let balance = exact
             .parse::<f64>()
             .map_err(|_| format!("Invalid balance format: {}", raw))?;
-        CHANNEL.set_token_balance(token.code, balance);
+        CHANNEL.set_token_balance(token.code, balance, exact);
     }
 
     Ok(())

@@ -70,6 +70,7 @@ impl TradeLogic {
             bip39: bip39_opt,
             trustline_limit: None,
             fee: fee.map(|d| d.to_string()),
+            vsize: None,
             tx_type: Some("offer_create".to_string()),
             taker_pays,
             taker_gets,

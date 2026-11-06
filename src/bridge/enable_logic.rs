@@ -65,6 +65,7 @@ impl TrustlineEnableLogic {
             seed,
             trustline_limit: Some(limit.to_string()),
             fee: fee.map(|d| d.to_string()),
+            vsize: None,
             tx_type: Some("trustset".to_string()),
             taker_pays: None,
             taker_gets: None,

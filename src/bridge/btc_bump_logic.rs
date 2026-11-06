@@ -25,7 +25,7 @@ impl BtcBumpLogic {
             params;
 
         let mut log = ActivityLogState::begin(
-            "Modify fee",
+            "Bump fee",
             &[
                 ("init", "Initializing"),
                 ("auth", "Authenticating"),

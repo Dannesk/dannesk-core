@@ -54,7 +54,7 @@ pub fn apply_node_stats_frame(data: &Value) {
         }
         let mut out = [0f32; 4];
         for (i, v) in a.iter().enumerate() {
-            out[i] = v.as_f64()? as f32;
+            out[i] = crate::utils::btc_send::printed_rate(v.as_f64()?);
         }
         Some(out)
     });

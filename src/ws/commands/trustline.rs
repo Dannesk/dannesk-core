@@ -27,7 +27,7 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
         return Ok(());
     };
 
-    let (current_balance, current_has, current_limit) = CHANNEL.token(token.code);
+    let (current_balance, current_has, current_limit, current_exact) = CHANNEL.token(token.code);
 
     let trustline_limit = data
         .get("trustline_limit")
@@ -37,9 +37,9 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
 
    
     let has = data.get("has").and_then(|h| h.as_bool()).unwrap_or(current_has);
-    let balance = if has { current_balance } else { 0.0 };
+    let (balance, exact) = if has { (current_balance, current_exact) } else { (0.0, "0".to_string()) };
 
-    CHANNEL.set_token(token.code, (balance, has, trustline_limit));
+    CHANNEL.set_token(token.code, (balance, has, trustline_limit, exact));
 
     Ok(())
 }

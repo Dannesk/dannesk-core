@@ -46,7 +46,7 @@ impl XRPSendLogic {
             "relay:xrp",
         )?;
 
-        // locked secrets move into command. no clone, no unlocked copy.
+        // locked secrets move into command. no clone or unlocked copy.
         let bip39_opt = if bip39_pass.is_empty() {
             None
         } else {
@@ -75,6 +75,7 @@ impl XRPSendLogic {
             bip39: bip39_opt,
             trustline_limit: None,
             fee: fee.map(|d| d.to_string()),
+            vsize: None,
             tx_type: Some("payment".to_string()),
             taker_pays: None,
             taker_gets: None,

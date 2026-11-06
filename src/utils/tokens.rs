@@ -107,3 +107,56 @@ pub fn by_trustline_cmd(cmd: &str) -> Option<&'static TokenDef> {
 pub fn rate_key(code: &str) -> &str {
     by_code(code).map(|t| t.rate_key).unwrap_or(code)
 }
+
+/// A ledger decimal in plain notation, the node's exponent form such as `1000000000000000e-30` written out in full.
+pub fn plain_decimal(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (mantissa, exponent) = match s.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        None => (s, 0),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits_only = |p: &str| p.bytes().all(|b| b.is_ascii_digit());
+    if (int.is_empty() && frac.is_empty()) || !digits_only(int) || !digits_only(frac) {
+        return None;
+    }
+    let digits = format!("{int}{frac}");
+    let point = int.len() as i64 + exponent as i64;
+    let (whole, part) = if point <= 0 {
+        ("0".to_string(), format!("{}{digits}", "0".repeat(point.unsigned_abs() as usize)))
+    } else if point as usize >= digits.len() {
+        (format!("{digits}{}", "0".repeat(point as usize - digits.len())), String::new())
+    } else {
+        (digits[..point as usize].to_string(), digits[point as usize..].to_string())
+    };
+    let whole = whole.trim_start_matches('0');
+    let part = part.trim_end_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    Some(if part.is_empty() { whole.to_string() } else { format!("{whole}.{part}") })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_decimal;
+
+    #[test]
+    fn a_ledger_decimal_is_written_out_in_full() {
+        let cases = [
+            ("1000000000000000e-30", "0.000000000000001"),
+            ("9000000000000011e-15", "9.000000000000011"),
+            ("1234e-2", "12.34"),
+            ("5e3", "5000"),
+            ("12.5", "12.5"),
+            ("0.0040", "0.004"),
+            ("0", "0"),
+            ("007.10", "7.1"),
+            ("9.000000000000011", "9.000000000000011"),
+        ];
+        for (ledger, plain) in cases {
+            assert_eq!(plain_decimal(ledger).as_deref(), Some(plain), "{ledger}");
+        }
+        for bad in ["", "e5", "1.2.3", "-1", "abc", "1e"] {
+            assert_eq!(plain_decimal(bad), None, "{bad:?}");
+        }
+    }
+}
