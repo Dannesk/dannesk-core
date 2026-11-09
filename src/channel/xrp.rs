@@ -70,9 +70,7 @@ pub struct PendingTrade {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TransactionState {
     pub transactions: HashMap<String, TransactionData>,
-    pub tx_page: HistoryPage,
- 
-    pub orders_page: HistoryPage,
+    pub page: HistoryPage,
 }
 
 impl TransactionState {
@@ -81,40 +79,21 @@ impl TransactionState {
         matches!(t.order_type.as_str(), "offercreate" | "offer_create")
     }
 
-    
-    pub fn held(&self, list: HistoryList) -> usize {
+    /// Every row but an order still on the book, which the relay never pages.
+    pub fn held(&self) -> usize {
         self.transactions
             .values()
-            .filter(|t| match list {
-                HistoryList::XrpTransactions => !Self::is_order(t),
-                HistoryList::XrpOrders => Self::is_order(t) && t.status != TransactionStatus::Pending,
-                HistoryList::BtcTransactions => false,
-            })
+            .filter(|t| !(Self::is_order(t) && t.status == TransactionStatus::Pending))
             .count()
     }
 
-    pub fn page(&self, list: HistoryList) -> &HistoryPage {
-        match list {
-            HistoryList::XrpOrders => &self.orders_page,
-            _ => &self.tx_page,
-        }
-    }
-
-    pub fn page_mut(&mut self, list: HistoryList) -> &mut HistoryPage {
-        match list {
-            HistoryList::XrpOrders => &mut self.orders_page,
-            _ => &mut self.tx_page,
-        }
-    }
-
-    pub fn apply_reply(&mut self, rows: Vec<TransactionData>, reply: &serde_json::Value, page: Option<HistoryList>) {
+    pub fn apply_reply(&mut self, rows: Vec<TransactionData>, reply: &serde_json::Value, page: bool) {
         for tx in rows {
             self.transactions.insert(tx.tx_id.clone(), tx);
         }
-        self.tx_page.facts(HistoryList::XrpTransactions, reply);
-        self.orders_page.facts(HistoryList::XrpOrders, reply);
-        if let Some(list) = page {
-            self.page_mut(list).done();
+        self.page.facts(HistoryList::XrpTransactions, reply);
+        if page {
+            self.page.done();
         }
     }
 }
@@ -173,3 +152,39 @@ pub struct Trade {
     pub asset: String,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ws::commands::get_transaction::parse_tx;
+    use serde_json::json;
+
+    fn row(hash: &str, kind: &str, status: &str) -> TransactionData {
+        parse_tx(&json!({ "hash": hash, "tx_type": kind, "status": status })).unwrap()
+    }
+
+    #[test]
+    fn held_counts_every_settled_row_and_no_order_still_on_the_book() {
+        let mut s = TransactionState::default();
+        for t in [
+            row("p", "Payment", "success"),
+            row("c", "OfferCancel", "success"),
+            row("f", "OfferCreate", "success"),
+            row("x", "OfferCreate", "cancelled"),
+            row("o", "OfferCreate", "pending"),
+        ] {
+            s.transactions.insert(t.tx_id.clone(), t);
+        }
+        assert_eq!(s.held(), 4);
+    }
+
+    #[test]
+    fn a_page_reply_reads_the_one_total_and_ends_the_request() {
+        let mut s = TransactionState::default();
+        s.page.start();
+        s.apply_reply(vec![row("p", "Payment", "success")], &json!({ "history_transactions": 25, "history_capped": false }), true);
+        assert_eq!(s.page.total, Some(25));
+        assert_eq!(s.page.status, crate::channel::PageStatus::Idle);
+        assert!(s.page.more_than(s.held()));
+    }
+}

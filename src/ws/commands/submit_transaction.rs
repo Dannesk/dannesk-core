@@ -306,10 +306,10 @@ fn outcome_sentence(status: &str, r: &Value) -> String {
             } else {
                 format!("Filled {}", traded)
             };
-            format!("{}. The rest did not fill and is gone.", of)
+            format!("{}.", of)
         }
        
-        "killed" => "Nothing filled \u{2014} the book moved before the order landed. Only the network fee was charged.".to_string(),
+        "killed" => "Not filled.".to_string(),
         "pending" if filled.parse::<f64>().unwrap_or(0.0) > 0.0 => {
             format!("Filled {}. The rest is resting on the book.", traded)
         }
@@ -412,12 +412,12 @@ mod tests {
         let on_xrp = order("0.5", "XRP", "0.7471", "RLUSD", "1", "XRP");
         assert_eq!(
             outcome_sentence("partial", &on_xrp),
-            "Filled 0.5 of 1 XRP at 1.4942 RLUSD. The rest did not fill and is gone."
+            "Filled 0.5 of 1 XRP at 1.4942 RLUSD."
         );
         let on_total = order("0.5", "XRP", "0.7471", "RLUSD", "1.4942", "RLUSD");
         assert_eq!(
             outcome_sentence("partial", &on_total),
-            "Received 0.7471 of 1.4942 RLUSD \u{2014} 0.5 XRP at 1.4942 RLUSD. The rest did not fill and is gone."
+            "Received 0.7471 of 1.4942 RLUSD \u{2014} 0.5 XRP at 1.4942 RLUSD."
         );
         assert_eq!(
             outcome_sentence("pending", &on_xrp),

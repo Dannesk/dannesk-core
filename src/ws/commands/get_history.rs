@@ -1,6 +1,6 @@
 
 
-use crate::channel::{CHANNEL, HistoryList, WSCommand};
+use crate::channel::{CHANNEL, WSCommand};
 use crate::ws::CRYPTO_OUTGOING_TX;
 use serde_json::{Value, json};
 use tungstenite::Message;
@@ -32,14 +32,8 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
     if CHANNEL.wallet_balance_rx.borrow().1.as_deref() != Some(wallet) {
         return Ok(());
     }
-    let list = match data.get("kind").and_then(|k| k.as_str()) {
-        Some("transactions") => HistoryList::XrpTransactions,
-        Some("orders") => HistoryList::XrpOrders,
-        _ => return Err("Missing history kind".to_string()),
-    };
-   
     if let Some(error) = data.get("error").and_then(|e| e.as_str()) {
-        CHANNEL.transactions_tx.send_modify(|state| state.page_mut(list).fail_any());
+        CHANNEL.transactions_tx.send_modify(|state| state.page.fail_any());
         return Err(format!("Server error: {}", error));
     }
     let rows: Vec<_> = data
@@ -49,6 +43,6 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
         .flatten()
         .filter_map(super::get_transaction::parse_tx)
         .collect();
-    CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(rows, &data, Some(list)));
+    CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(rows, &data, true));
     Ok(())
 }

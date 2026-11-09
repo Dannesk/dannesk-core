@@ -93,7 +93,7 @@ pub async fn process_response(message: Message, _current_wallet: &str) -> Result
             }
 
          
-            CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(transactions_data, &data, None));
+            CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(transactions_data, &data, false));
 
             CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.xrp, true));
 

@@ -1,4 +1,4 @@
-use crate::channel::{CHANNEL, HistoryList, PendingWallet, WSCommand};
+use crate::channel::{CHANNEL, PendingWallet, WSCommand};
 use crate::ws::commands::Command;
 use crate::ws::config::{TAG_BTC, TAG_RELAY};
 use serde::Serialize;
@@ -38,11 +38,7 @@ pub fn report_unsent(payload: &str) -> bool {
             true
         }
         Some("get_history") => {
-            let list = match v.get("kind").and_then(|k| k.as_str()) {
-                Some("orders") => HistoryList::XrpOrders,
-                _ => HistoryList::XrpTransactions,
-            };
-            CHANNEL.transactions_tx.send_modify(|state| state.page_mut(list).fail_any());
+            CHANNEL.transactions_tx.send_modify(|state| state.page.fail_any());
             true
         }
         Some("get_bitcoin_history") => {

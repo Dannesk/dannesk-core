@@ -181,7 +181,7 @@ pub async fn process_response(
                     .flatten()
                     .filter_map(parse_tx)
                     .collect();
-                CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(rows, &data, None));
+                CHANNEL.transactions_tx.send_modify(|state| state.apply_reply(rows, &data, false));
             
                 CHANNEL.loaded_tx.send_if_modified(|l| !std::mem::replace(&mut l.xrp, true));
 

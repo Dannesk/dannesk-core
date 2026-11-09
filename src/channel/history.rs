@@ -6,25 +6,17 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryList {
     XrpTransactions,
-    XrpOrders,
     BtcTransactions,
 }
 
 impl HistoryList {
 
     pub fn kind(self) -> &'static str {
-        match self {
-            HistoryList::XrpTransactions => "transactions",
-            HistoryList::XrpOrders => "orders",
-            HistoryList::BtcTransactions => "transactions",
-        }
+        "transactions"
     }
 
     pub fn total_field(self) -> &'static str {
-        match self {
-            HistoryList::XrpTransactions | HistoryList::BtcTransactions => "history_transactions",
-            HistoryList::XrpOrders => "history_orders",
-        }
+        "history_transactions"
     }
 }
 
@@ -95,11 +87,11 @@ mod tests {
         let mut p = HistoryPage::default();
         let seq = p.start();
         assert_eq!(p.status, PageStatus::Fetching);
-        let reply = json!({ "history_orders": 7, "history_transactions": 40, "history_capped": true });
-        p.facts(HistoryList::XrpOrders, &reply);
+        let reply = json!({ "history_transactions": 7, "history_capped": true });
+        p.facts(HistoryList::XrpTransactions, &reply);
         assert_eq!(p.total, Some(7));
         assert!(p.capped);
-        assert_eq!(p.status, PageStatus::Fetching, "still waiting for this list's page");
+        assert_eq!(p.status, PageStatus::Fetching, "still waiting...");
         p.done();
         assert_eq!(p.status, PageStatus::Idle);
         p.fail(seq);
