@@ -1,4 +1,4 @@
-//! Dannesk's core: communication layer
+// Dannesk's core: communication layer
 
 pub mod bridge;
 pub mod btc_script_type;
@@ -7,6 +7,7 @@ pub mod decrypt;
 pub mod encrypt;
 pub mod gate;
 pub mod secure;
+pub mod settings;
 pub mod utils;
 pub mod wallet;
 pub mod ws;

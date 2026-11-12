@@ -24,9 +24,10 @@ pub fn wipe_wallet_data() {
         }
     }
 
-    for file in ["xrp_encrypt.json", "xrp.json", "btc_encrypt.json", "btc.json", "settings.json"] {
+    for file in ["xrp_encrypt.json", "xrp.json", "btc_encrypt.json", "btc.json"] {
         let _ = remove_json(file);
     }
+    crate::settings::reset();
 
     let _ = CHANNEL.wallet_balance_tx.send((0.0, None, false, KeyMode::Standard));
     let _ = CHANNEL.transactions_tx.send(TransactionState::default());

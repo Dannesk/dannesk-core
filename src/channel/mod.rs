@@ -213,6 +213,9 @@ pub struct Channel {
 
     pub activity_tx: watch::Sender<Option<ActivityLogState>>,
     pub activity_rx: watch::Receiver<Option<ActivityLogState>>,
+
+    pub settings_tx: watch::Sender<crate::settings::Settings>,
+    pub settings_rx: watch::Receiver<crate::settings::Settings>,
  
     pub rates_ws_status_tx: watch::Sender<bool>,
     pub rates_ws_status_rx: watch::Receiver<bool>,
@@ -291,6 +294,7 @@ impl Channel {
         let (rate_history_tx, rate_history_rx) = watch::channel(HashMap::new());
         let (rate_history_long_tx, rate_history_long_rx) = watch::channel(HashMap::new());
         let (activity_tx, activity_rx) = watch::channel(None);
+        let (settings_tx, settings_rx) = watch::channel(crate::settings::Settings::default());
         let (btc_send_dispatched_tx, btc_send_dispatched_rx) = watch::channel(0);
         let (rates_ws_status_tx, rates_ws_status_rx) = watch::channel(false);
         let (relay_ws_status_tx, relay_ws_status_rx) = watch::channel(false);
@@ -331,6 +335,8 @@ impl Channel {
 
         Channel {
 
+            settings_tx,
+            settings_rx,
             rates_tx,
             rates_rx,
             rate_history_tx,

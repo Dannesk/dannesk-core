@@ -75,10 +75,7 @@ pub fn delete() {
 }
 
 pub fn enabled() -> bool {
-    json_storage::read_json::<serde_json::Value>("settings.json")
-        .ok()
-        .and_then(|j| j.get("gate_enabled").and_then(|v| v.as_bool()))
-        .unwrap_or(true)
+    crate::channel::CHANNEL.settings_rx.borrow().gate_enabled
 }
 
 pub fn clear_attempts() {
