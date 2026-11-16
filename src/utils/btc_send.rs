@@ -9,6 +9,9 @@ pub struct BtcSendDraft {
     pub recipient: String,
     pub amount: String,
     pub custom: Option<String>,
+    /// btc fee rate being typed, which is priced beside the custom rate in use to avoid stale data.
+    #[serde(default)]
+    pub typed: Option<String>,
     pub max: bool,
 }
 
@@ -28,6 +31,7 @@ pub struct BtcSendQuote {
     pub dust: Option<u64>,
     pub tiers: Option<[FeeQuote; 4]>,
     pub custom: Option<FeeQuote>,
+    pub typed: Option<FeeQuote>,
 }
 
 pub fn dust_limit(address: &Address) -> u64 {
@@ -109,18 +113,18 @@ pub fn price(draft: &BtcSendDraft, own: BtcScriptType, coins: Option<&[Utxo]>, t
         };
         FeeQuote { rate, fee, vsize, max: spendable.unwrap_or(0).saturating_sub(swept) }
     };
-    let custom = draft
-        .custom
-        .as_deref()
-        .and_then(|r| r.trim().parse::<f64>().ok())
-        .filter(|r| r.is_finite() && *r > 0.0)
-        .map(printed_rate);
+    let rate_of = |r: Option<&str>| {
+        r.and_then(|r| r.trim().parse::<f64>().ok())
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .map(printed_rate)
+    };
     BtcSendQuote {
         draft: draft.clone(),
         spendable,
         dust: recipient.as_ref().map(dust_limit),
         tiers: tiers.map(|t| t.map(&quote)),
-        custom: custom.map(&quote),
+        custom: rate_of(draft.custom.as_deref()).map(&quote),
+        typed: rate_of(draft.typed.as_deref()).map(&quote),
     }
 }
 
@@ -190,7 +194,7 @@ mod tests {
     }
 
     fn draft(recipient: &str, amount: &str, custom: Option<&str>) -> BtcSendDraft {
-        BtcSendDraft { recipient: recipient.to_string(), amount: amount.to_string(), custom: custom.map(String::from), max: false }
+        BtcSendDraft { recipient: recipient.to_string(), amount: amount.to_string(), custom: custom.map(String::from), typed: None, max: false }
     }
 
     fn fees(q: &BtcSendQuote) -> [u64; 4] {
@@ -344,6 +348,25 @@ mod tests {
             let q = price(&draft(P2WPKH, "0.0025", Some(bad)), BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST));
             assert_eq!(q.custom, None, "{bad:?} was priced");
         }
+    }
+
+    #[test]
+    fn a_typed_rate_is_priced_beside_the_custom_rate_in_use() {
+        let set = coins(&[500_000]);
+        let both = BtcSendDraft { typed: Some("0.8".to_string()), ..draft(P2WPKH, "0.0025", Some("0.5")) };
+        let q = price(&both, BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST));
+        assert_eq!(q.custom.map(|c| c.fee), Some(71));
+        assert_eq!(q.typed.map(|c| (c.rate, c.fee)), Some((0.8, 113)));
+        let alone = price(&draft(P2WPKH, "0.0025", Some("0.8")), BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST));
+        assert_eq!(q.typed, alone.custom);
+        assert_eq!(price(&draft(P2WPKH, "0.0025", Some("0.5")), BtcScriptType::NativeSegwit, Some(&set), Some(AUGUST)).typed, None);
+    }
+
+    #[test]
+    fn a_draft_without_a_typed_rate_still_parses() {
+        let json = r#"{"recipient":"","amount":"0.001","custom":"0.5","max":false}"#;
+        let d: BtcSendDraft = serde_json::from_str(json).unwrap();
+        assert_eq!(d, BtcSendDraft { amount: "0.001".to_string(), custom: Some("0.5".to_string()), ..Default::default() });
     }
 
     #[test]

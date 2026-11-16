@@ -746,7 +746,7 @@ mod sign_tests {
         let to = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
         let total: u64 = coins.iter().map(|c| c.amount).sum();
         let btc = |sats: u64| format!("{:.8}", sats as f64 / 1e8);
-        let draft = BtcSendDraft { recipient: to.to_string(), amount: btc(typed), custom: Some("1.5".to_string()), max };
+        let draft = BtcSendDraft { recipient: to.to_string(), amount: btc(typed), custom: Some("1.5".to_string()), typed: None, max };
         let quote = price(&draft, kind, Some(coins), Some(tiers));
         let mut built = 0;
         for t in quote.tiers.unwrap().into_iter().chain(quote.custom) {
