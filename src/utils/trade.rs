@@ -35,21 +35,13 @@ pub enum TradeTif {
     Fok,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TradeUnit {
-    Base,
-    Quote,
-}
-
-// amount is in the unit typed, limit is quote per base, and side and kind stay None until user picks one.
+// amount is in the base, limit is quote per base, and side and kind stay None until user picks one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeTicket {
     pub base: String,
     pub quote: String,
     pub side: Option<TradeSide>,
     pub kind: Option<TradeKind>,
-    pub unit: TradeUnit,
     pub amount: String,
     pub limit: Option<f64>,
     pub tif: TradeTif,
@@ -63,12 +55,9 @@ impl TradeTicket {
         })
     }
 
-    // The typed amount is the one paid when it is the base on a sell or the quote on a buy
+    // A sell pays exactly the typed amount and a buy receives it
     pub fn anchor_is_pay(&self) -> bool {
-        matches!(
-            (self.side, self.unit),
-            (Some(TradeSide::Sell), TradeUnit::Base) | (Some(TradeSide::Buy), TradeUnit::Quote)
-        )
+        self.side == Some(TradeSide::Sell)
     }
 }
 
@@ -154,8 +143,7 @@ pub struct TradeQuote {
     pub receive: Option<String>,
     pub flags: Vec<String>,
     pub lockable: bool,
-    pub max: Option<f64>,
-    pub max_pay: Option<f64>,
+    pub max_base: Option<f64>,
 }
 
 fn frame_ok(frame: u64) -> bool {
@@ -367,8 +355,8 @@ fn available_pay(o: Order) -> Option<f64> {
     }
 }
 
-// The largest typed amount the ticket could ask for, rounded so the paid side never exceeds the balance
-fn max_typed(o: Order) -> Option<f64> {
+// The largest base amount the ticket could ask for, rounded so the paid side never exceeds the balance
+fn max_base(o: Order) -> Option<f64> {
     let avail = available_pay(o)?;
     if o.anchor_is_pay() {
         return Some(avail);
@@ -457,8 +445,7 @@ pub fn compute(t: &TradeTicket) -> TradeQuote {
         receive: None,
         flags: Vec::new(),
         lockable: false,
-        max: None,
-        max_pay: None,
+        max_base: None,
     };
     let Some(o) = Order::of(t) else { return quote };
 
@@ -495,8 +482,7 @@ pub fn compute(t: &TradeTicket) -> TradeQuote {
         };
     quote.verdict = verdict;
     quote.flags = flags(o);
-    quote.max = max_typed(o);
-    quote.max_pay = available_pay(o);
+    quote.max_base = max_base(o);
     quote
 }
 
@@ -572,17 +558,21 @@ mod tests {
     use super::*;
     use crate::channel::MarketSummary;
 
-    fn ticket(side: TradeSide, kind: TradeKind, unit: TradeUnit, amount: &str, limit: Option<f64>, tif: TradeTif) -> TradeTicket {
+    fn ticket(side: TradeSide, kind: TradeKind, amount: &str, limit: Option<f64>, tif: TradeTif) -> TradeTicket {
         TradeTicket {
             base: "XRP".to_string(),
             quote: "RLUSD".to_string(),
             side: Some(side),
             kind: Some(kind),
-            unit,
             amount: amount.to_string(),
             limit,
             tif,
         }
+    }
+
+    fn reversed(mut t: TradeTicket) -> TradeTicket {
+        std::mem::swap(&mut t.base, &mut t.quote);
+        t
     }
 
     fn order(t: &TradeTicket) -> Order<'_> {
@@ -590,22 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn the_typed_side_is_paid_when_it_is_the_base_on_a_sell_or_the_quote_on_a_buy() {
-        let sell = ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, "250", Some(1.3004), TradeTif::Gtc);
+    fn a_sell_pays_the_base_and_a_buy_receives_it_whichever_way_the_pair_runs() {
+        let sell = ticket(TradeSide::Sell, TradeKind::Limit, "250", Some(1.3004), TradeTif::Gtc);
         assert_eq!(sell.pay_recv(), Some(("XRP", "RLUSD")));
         assert!(sell.anchor_is_pay());
-        let buy = ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Base, "250", Some(1.3004), TradeTif::Gtc);
+        let buy = ticket(TradeSide::Buy, TradeKind::Limit, "250", Some(1.3004), TradeTif::Gtc);
         assert_eq!(buy.pay_recv(), Some(("RLUSD", "XRP")));
         assert!(!buy.anchor_is_pay());
-        assert!(!ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Quote, "1", None, TradeTif::Gtc).anchor_is_pay());
-        assert!(ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Quote, "1", None, TradeTif::Gtc).anchor_is_pay());
+        assert_eq!(reversed(sell).pay_recv(), Some(("RLUSD", "XRP")));
+        assert_eq!(reversed(buy).pay_recv(), Some(("XRP", "RLUSD")));
     }
 
     #[test]
     fn the_internal_rate_is_receive_per_pay_on_both_sides() {
-        let sell = ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, "1000", Some(1.3004), TradeTif::Gtc);
+        let sell = ticket(TradeSide::Sell, TradeKind::Limit, "1000", Some(1.3004), TradeTif::Gtc);
         assert!((order(&sell).internal_limit() - 1.3004).abs() < 1e-12);
-        let buy = ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Base, "1000", Some(1.3004), TradeTif::Gtc);
+        let buy = ticket(TradeSide::Buy, TradeKind::Limit, "1000", Some(1.3004), TradeTif::Gtc);
         let o = order(&buy);
         assert!((o.internal_limit() - 1.0 / 1.3004).abs() < 1e-12);
         assert!((o.market_price(o.internal_limit()) - 1.3004).abs() < 1e-9);
@@ -613,90 +603,76 @@ mod tests {
 
     #[test]
     fn terms_round_against_the_signer_on_the_derived_side() {
-        let sell = ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, "1000", Some(1.3004), TradeTif::Gtc);
+        let sell = ticket(TradeSide::Sell, TradeKind::Limit, "1000", Some(1.3004), TradeTif::Gtc);
         let o = order(&sell);
         let tm = terms(o, o.internal_limit());
         assert_eq!(tm.pay, 1000.0);
         assert_eq!(tm.receive, 1300.4);
-        let buy = ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Base, "1000", Some(1.3004), TradeTif::Gtc);
+        let buy = ticket(TradeSide::Buy, TradeKind::Limit, "1000", Some(1.3004), TradeTif::Gtc);
         let o = order(&buy);
         let tm = terms(o, o.internal_limit());
         assert_eq!(tm.receive, 1000.0);
         assert!(tm.pay >= 1300.4 && tm.pay < 1300.400001, "{}", tm.pay);
-        let spend = ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Quote, "1300.4", Some(1.3004), TradeTif::Gtc);
-        let o = order(&spend);
-        let tm = terms(o, o.internal_limit());
-        assert_eq!(tm.pay, 1300.4);
-        assert!(tm.receive <= 1000.0 && tm.receive > 999.999998, "{}", tm.receive);
-        let earn = ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Quote, "1300.4", Some(1.3004), TradeTif::Gtc);
-        let o = order(&earn);
-        let tm = terms(o, o.internal_limit());
-        assert_eq!(tm.receive, 1300.4);
-        assert!(tm.pay >= 1000.0 && tm.pay < 1000.000001, "{}", tm.pay);
     }
 
     #[test]
-    fn the_flags_carry_the_tif_and_the_paid_side_carries_tfsell() {
-        let f = |side, kind, unit, tif| flags(order(&ticket(side, kind, unit, "1", Some(1.3), tif)));
-        assert_eq!(f(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, TradeTif::Gtc), vec!["tfSell".to_string()]);
+    fn the_flags_carry_the_tif_and_the_sell_side_carries_tfsell() {
+        let f = |side, kind, tif| flags(order(&ticket(side, kind, "1", Some(1.3), tif)));
+        assert_eq!(f(TradeSide::Sell, TradeKind::Limit, TradeTif::Gtc), vec!["tfSell".to_string()]);
         assert_eq!(
-            f(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, TradeTif::Ioc),
+            f(TradeSide::Sell, TradeKind::Limit, TradeTif::Ioc),
             vec!["tfImmediateOrCancel".to_string(), "tfSell".to_string()]
         );
-        assert_eq!(f(TradeSide::Buy, TradeKind::Limit, TradeUnit::Base, TradeTif::Fok), vec!["tfFillOrKill".to_string()]);
-        assert_eq!(f(TradeSide::Buy, TradeKind::Market, TradeUnit::Base, TradeTif::Gtc), vec!["tfImmediateOrCancel".to_string()]);
-        assert_eq!(
-            f(TradeSide::Buy, TradeKind::Market, TradeUnit::Quote, TradeTif::Gtc),
-            vec!["tfImmediateOrCancel".to_string(), "tfSell".to_string()]
-        );
-        assert_eq!(f(TradeSide::Sell, TradeKind::Limit, TradeUnit::Quote, TradeTif::Gtc), Vec::<String>::new());
+        assert_eq!(f(TradeSide::Buy, TradeKind::Limit, TradeTif::Fok), vec!["tfFillOrKill".to_string()]);
+        assert_eq!(f(TradeSide::Buy, TradeKind::Market, TradeTif::Gtc), vec!["tfImmediateOrCancel".to_string()]);
     }
 
     #[test]
-    fn each_side_and_unit_signs_its_own_amounts_and_flags() {
-        let cases: [(TradeSide, TradeUnit, &str, (&str, &str), (&str, &str), &[&str]); 4] = [
-            (TradeSide::Sell, TradeUnit::Base, "100", ("XRP", "100"), ("RLUSD", "130"), &["tfSell"]),
-            (TradeSide::Buy, TradeUnit::Base, "100", ("RLUSD", "130"), ("XRP", "100"), &[]),
-            (TradeSide::Sell, TradeUnit::Quote, "130", ("XRP", "100"), ("RLUSD", "130"), &[]),
-            (TradeSide::Buy, TradeUnit::Quote, "130", ("RLUSD", "130"), ("XRP", "100"), &["tfSell"]),
+    fn each_side_signs_its_own_amounts_and_flags_on_either_orientation() {
+        let cases: [(&str, TradeSide, f64, (&str, &str), (&str, &str), &[&str]); 4] = [
+            ("XRP", TradeSide::Sell, 1.3, ("XRP", "100"), ("RLUSD", "130"), &["tfSell"]),
+            ("XRP", TradeSide::Buy, 1.3, ("RLUSD", "130"), ("XRP", "100"), &[]),
+            ("RLUSD", TradeSide::Sell, 0.8, ("RLUSD", "100"), ("XRP", "80"), &["tfSell"]),
+            ("RLUSD", TradeSide::Buy, 0.8, ("XRP", "80"), ("RLUSD", "100"), &[]),
         ];
-        for (side, unit, amount, gets, pays, want_flags) in cases {
-            let q = compute(&ticket(side, TradeKind::Limit, unit, amount, Some(1.3), TradeTif::Gtc));
-            assert_eq!((q.pay_asset.as_str(), q.pay.as_deref().unwrap_or("")), gets, "TakerGets for {side:?} {unit:?}");
-            assert_eq!((q.receive_asset.as_str(), q.receive.as_deref().unwrap_or("")), pays, "TakerPays for {side:?} {unit:?}");
-            assert_eq!(q.flags, want_flags.iter().map(|f| f.to_string()).collect::<Vec<_>>(), "flags for {side:?} {unit:?}");
-            assert!(q.lockable, "{side:?} {unit:?}");
+        for (base, side, price, gets, pays, want_flags) in cases {
+            let mut t = ticket(side, TradeKind::Limit, "100", Some(price), TradeTif::Gtc);
+            if base != "XRP" {
+                t = reversed(t);
+            }
+            let q = compute(&t);
+            assert_eq!((q.pay_asset.as_str(), q.pay.as_deref().unwrap_or("")), gets, "TakerGets for {side:?} on {base}");
+            assert_eq!((q.receive_asset.as_str(), q.receive.as_deref().unwrap_or("")), pays, "TakerPays for {side:?} on {base}");
+            assert_eq!(q.flags, want_flags.iter().map(|f| f.to_string()).collect::<Vec<_>>(), "flags for {side:?} on {base}");
+            assert!(q.lockable, "{side:?} on {base}");
         }
     }
 
     #[test]
-    fn spending_a_whole_token_balance_signs_the_ledgers_string() {
+    fn selling_a_whole_token_balance_signs_the_ledgers_string() {
         CHANNEL.set_token("WHOLETEST", (0.123456789, true, None, "0.123456789".to_string()));
-        let mut t = ticket(TradeSide::Buy, TradeKind::Limit, TradeUnit::Quote, "0.123456789", Some(2.0), TradeTif::Ioc);
-        t.quote = "WHOLETEST".to_string();
+        let mut t = ticket(TradeSide::Sell, TradeKind::Limit, "0.123456789", Some(2.0), TradeTif::Ioc);
+        t.base = "WHOLETEST".to_string();
+        t.quote = "XRP".to_string();
         let q = compute(&t);
         assert_eq!(q.pay_asset, "WHOLETEST");
         assert_eq!(q.pay.as_deref(), Some("0.123456789"));
-        assert_eq!(q.receive.as_deref(), Some("0.061728"));
+        assert_eq!(q.receive.as_deref(), Some("0.246913"));
         assert_eq!(q.flags, vec!["tfImmediateOrCancel".to_string(), "tfSell".to_string()]);
-        assert_eq!(q.max_pay, Some(0.123456789));
-        assert_eq!(q.max, Some(0.123456789));
-        t.unit = TradeUnit::Base;
-        t.amount = "0.061728".to_string();
-        let q = compute(&t);
-        assert_ne!(q.pay.as_deref(), Some("0.123456789"), "a typed XRP figure derives the paid side");
-        assert_eq!(q.max_pay, Some(0.123456789));
+        assert_eq!(q.max_base, Some(0.123456789));
+        t.amount = "0.1234567".to_string();
+        assert_eq!(compute(&t).pay.as_deref(), Some("0.123456"), "a typed figure is floored to six places");
     }
 
     #[test]
     fn a_ticket_with_nothing_picked_quotes_only_the_book() {
-        let mut t = ticket(TradeSide::Sell, TradeKind::Limit, TradeUnit::Base, "100", Some(1.3), TradeTif::Gtc);
+        let mut t = ticket(TradeSide::Sell, TradeKind::Limit, "100", Some(1.3), TradeTif::Gtc);
         t.side = None;
         t.kind = None;
         let q = compute(&t);
         assert!(q.market_ok);
         assert_eq!(q.pay_asset, "");
-        assert!(q.pay.is_none() && q.receive.is_none() && q.flags.is_empty() && q.max.is_none() && q.max_pay.is_none());
+        assert!(q.pay.is_none() && q.receive.is_none() && q.flags.is_empty() && q.max_base.is_none());
         assert!(!q.lockable);
         t.side = Some(TradeSide::Sell);
         let q = compute(&t);
@@ -733,7 +709,7 @@ mod tests {
             m.insert("XRP/NEARTEST".to_string(), summary(1.0, 0));
         });
 
-        let mut t = ticket(TradeSide::Sell, TradeKind::Market, TradeUnit::Base, "10", None, TradeTif::Gtc);
+        let mut t = ticket(TradeSide::Sell, TradeKind::Market, "10", None, TradeTif::Gtc);
         t.quote = "OFFTEST".to_string();
         let q = compute(&t);
         assert!(
@@ -752,19 +728,20 @@ mod tests {
         assert!(q.lockable);
 
         t.quote = "OFFTEST".to_string();
-        t.side = Some(TradeSide::Buy);
-        t.unit = TradeUnit::Quote;
+        t = reversed(t);
         t.amount = "11".to_string();
         let q = compute(&t);
-        assert_eq!(q.pay.as_deref(), Some("11"), "spending the quote pays exactly what was typed");
+        assert_eq!(q.pay.as_deref(), Some("11"), "selling the reversed pair's base pays exactly what was typed");
         assert_eq!((q.pay_asset.as_str(), q.receive_asset.as_str()), ("OFFTEST", "XRP"));
         assert!(q.flags.contains(&"tfSell".to_string()));
         assert!(q.counter.is_some_and(|c| (c - 10.0).abs() < 1e-9), "{:?}", q.counter);
+        assert!(matches!(q.verdict, Verdict::Walked { off_market: true, .. }), "{:?}", q.verdict);
+        assert!(q.lockable);
     }
 
     #[test]
     fn only_a_resting_limit_holds_the_reserve() {
-        let rest = |kind, tif| can_rest(order(&ticket(TradeSide::Sell, kind, TradeUnit::Base, "1", Some(1.3), tif)));
+        let rest = |kind, tif| can_rest(order(&ticket(TradeSide::Sell, kind, "1", Some(1.3), tif)));
         assert!(rest(TradeKind::Limit, TradeTif::Gtc));
         assert!(!rest(TradeKind::Limit, TradeTif::Ioc));
         assert!(!rest(TradeKind::Limit, TradeTif::Fok));
@@ -782,19 +759,18 @@ mod tests {
 
     #[test]
     fn a_ticket_parses_from_the_apps_json() {
-        let json = r#"{"base":"XRP","quote":"RLUSD","side":"sell","kind":"limit","unit":"base","amount":"250","limit":1.3004,"tif":"gtc"}"#;
+        let json = r#"{"base":"XRP","quote":"RLUSD","side":"sell","kind":"limit","amount":"250","limit":1.3004,"tif":"gtc"}"#;
         let t: TradeTicket = serde_json::from_str(json).unwrap();
         assert_eq!(t.side, Some(TradeSide::Sell));
         assert_eq!(t.kind, Some(TradeKind::Limit));
-        assert_eq!(t.unit, TradeUnit::Base);
         assert_eq!(t.tif, TradeTif::Gtc);
         assert_eq!(t.limit, Some(1.3004));
-        let market = r#"{"base":"XRP","quote":"RLUSD","side":"buy","kind":"market","unit":"quote","amount":"","limit":null,"tif":"gtc"}"#;
+        let market = r#"{"base":"RLUSD","quote":"XRP","side":"buy","kind":"market","amount":"","limit":null,"tif":"gtc"}"#;
         let t: TradeTicket = serde_json::from_str(market).unwrap();
         assert_eq!(t.kind, Some(TradeKind::Market));
-        assert_eq!(t.unit, TradeUnit::Quote);
+        assert_eq!((t.base.as_str(), t.quote.as_str()), ("RLUSD", "XRP"));
         assert_eq!(t.limit, None);
-        let fresh = r#"{"base":"XRP","quote":"RLUSD","side":null,"kind":null,"unit":"base","amount":"","limit":null,"tif":"gtc"}"#;
+        let fresh = r#"{"base":"XRP","quote":"RLUSD","side":null,"kind":null,"amount":"","limit":null,"tif":"gtc"}"#;
         let t: TradeTicket = serde_json::from_str(fresh).unwrap();
         assert_eq!((t.side, t.kind), (None, None));
     }
