@@ -1,6 +1,6 @@
 use crate::channel::{BtcRbfInfo, CHANNEL};
 use crate::utils::btc_send::printed_rate;
-use crate::ws::commands::bitcoin_payment::{min_replacement_fee, price_replacement, rbf_info_for, spare_coins, BumpPrice, Utxo};
+use crate::ws::commands::bitcoin_payment::{min_replacement_fee, price_replacement, rbf_info_for, spare_coins, BumpPrice, Utxo, MAX_FEE_RATE};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,7 @@ pub struct BtcBumpQuote {
     pub draft: BtcBumpDraft,
     pub now: BumpFee,
     pub min_rate: f32,
+    pub max_rate: f32,
     pub tiers: [Option<BumpFee>; 4],
     pub custom: Option<BumpFee>,
 }
@@ -105,6 +106,7 @@ pub fn price(draft: &BtcBumpDraft, info: &BtcRbfInfo, own: &str, spares: &[Utxo]
             adds_coin: false,
         },
         min_rate: min_rate(info, own, spares),
+        max_rate: MAX_FEE_RATE,
         tiers: tiers.map(|t| at(t, true)),
         custom: custom.and_then(|r| at(r, false)),
     }
