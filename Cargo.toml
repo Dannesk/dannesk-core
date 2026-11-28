@@ -13,7 +13,7 @@ publish = false
 # are on crates.io.
 dannesk-xrpl-codec = { git = "https://github.com/Dannesk/dannesk-xrpl-codec", rev = "6923f5c0fb9c84ce4b55a6768c4a15accb8a4f9e" }
 dannesk-btc-codec = { git = "https://github.com/Dannesk/dannesk-btc-codec", rev = "74a94be6df08135deaaffe36f1b3b693584594a1" }
-dannesk-noise-protocol = { git = "https://github.com/Dannesk/dannesk-noise-protocol", rev = "afc9ea8c209e6e2a6838f9b0fb4cb84c30491ad9", features = ["tokio"] }
+dannesk-noise-protocol = { git = "https://github.com/Dannesk/dannesk-noise-protocol", rev = "dedaad4d2d1bff66d7639c43f0fc3c2cf3316b30", features = ["tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["full"] }
